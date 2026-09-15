@@ -32,7 +32,34 @@ function stripDevMainFromDist() {
   }
 }
 
+/** uTools 打包禁止 .map / .js.gz 等调试文件；xlsx 等依赖会带上，构建后清掉 */
+function cleanDebugFiles() {
+  const banned = /\.(map|gz)$/i
+  function walk(dir) {
+    if (!fs.existsSync(dir)) return
+    for (const name of fs.readdirSync(dir)) {
+      const full = path.join(dir, name)
+      let st
+      try { st = fs.statSync(full) } catch { continue }
+      if (st.isDirectory()) walk(full)
+      else if (banned.test(name)) {
+        try { fs.unlinkSync(full) } catch { /* ignore */ }
+      }
+    }
+  }
+  return {
+    name: 'clean-debug-files',
+    closeBundle() {
+      walk(path.resolve(__dirname, 'dist'))
+    },
+  }
+}
+
 export default defineConfig({
-  plugins: [vue(), stripCrossorigin(), stripDevMainFromDist()],
+  plugins: [vue(), stripCrossorigin(), stripDevMainFromDist(), cleanDebugFiles()],
   base: './',
+  build: {
+    sourcemap: false,
+  },
 })
+
