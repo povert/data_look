@@ -1,0 +1,27 @@
+{
+  "main": "dist/index.html",
+  "preload": "public/preload/services.js",
+  "logo": "public/logo.png",
+  "pluginSetting": {
+    "single": true,
+    "height": 544
+  },
+  "features": [
+    {
+      "code": "view",
+      "explain": "查看 JSON / JSONL / CSV / Excel 数据文件，支持分页、筛选、钻取",
+      "cmds": [
+        "数据查看",
+        "查看数据",
+        "json查看",
+        {
+          "type": "files",
+          "label": "查看数据文件",
+          "fileType": "file",
+          "extensions": ["json", "jsonl", "ndjson", "csv", "tsv", "xlsx", "xls"],
+          "maxLength": 1
+        }
+      ]
+    }
+  ]
+}
