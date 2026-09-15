@@ -136,13 +136,28 @@ function record(filePath, segPath) {
 }
 
 function getFileInfo(filePath) {
-  const b = getHandle(filePath)
+  // 只做 stat，不构造 backend，避免大文件打开时 UI 假死
+  if (!filePath || typeof filePath !== 'string') {
+    throw new Error('缺少文件路径')
+  }
+  const abs = path.resolve(filePath)
+  let st
+  try {
+    st = fs.statSync(abs)
+  } catch {
+    throw new Error('文件不存在')
+  }
+  if (!st.isFile()) throw new Error('不是文件')
+  const category = fileCategory(abs)
+  if (!category) {
+    throw new Error('不支持的文件类型，支持：' + SUPPORTED_EXTS.join(', '))
+  }
   return {
-    file: b.path,
-    category: b.category,
-    name: b.name,
-    size: b.size,
-    sizeText: humanSize(b.size),
+    file: abs,
+    category,
+    name: path.basename(abs),
+    size: st.size,
+    sizeText: humanSize(st.size),
   }
 }
 

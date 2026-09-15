@@ -6,7 +6,7 @@
 
 | 类型 | 扩展名 | 说明 |
 |------|--------|------|
-| JSON | `.json` | 整文件解析（≤400MB），对象/数组钻取 |
+| JSON | `.json` | ≤2GB 整载内存；更大文件流式索引分页 |
 | JSONL | `.jsonl` `.ndjson` | 行偏移索引，大文件 O(1) 分页 |
 | CSV/TSV | `.csv` `.tsv` | 表头 + 行索引分页 |
 | Excel | `.xlsx` `.xls` | SheetJS 解析，多 Sheet、合并单元格 |
@@ -14,9 +14,10 @@
 ### 交互
 
 - **打开文件**：插件内按钮，或在 uTools 中选中文件后触发「查看数据文件」
-- **表格**：分页（20/50/100）、列筛选（回车提交）、全局搜索、隐藏列、提取嵌套字段为新列
-- **钻取**：面包屑 / 路径跳转（如 `results[0].id`）
-- **原始内容**：行号或可展开单元格 → 折叠 JSON 树弹窗
+- **表格**：分页（20/50/100）、列筛选、全局搜索（支持区分大小写 / 正则 / `""` 空值）、隐藏列、提取嵌套字段
+- **钻取**：面包屑点击跳转，✎ 或双击可编辑路径
+- **原始内容**：单元格或行号 → 折叠 JSON 树（可全部展开/收起）
+- **复制**：拖选单元格，Ctrl+C 复制（TSV+HTML，可粘贴到 Excel）
 
 ## 开发
 
@@ -41,13 +42,13 @@ npm run build        # 产物在 dist/
 ## 结构
 
 ```
-plugin.json              # 根配置（开发时 uTools 加载这个）
+plugin.json              # 根配置（指向 dist，便于开发工具直接加载）
 public/
-  plugin.json            # 打包进 dist 的配置
+  plugin.json            # 打包进 dist 的配置（勿带 development.main）
   preload/
     services.js          # window.services：view / record / pickDataFile
     libs/
-      paths.js nodes.js
+      paths.js nodes.js json-stream.js
       backends/{json,jsonl,csv,excel}.js
 src/
   App.vue
@@ -67,10 +68,3 @@ window.services.pickDataFile()
 
 `where` 示例：`{ "*": "关键字", name: "foo" }`
 `extraCols` 示例：`["user.id", "meta.tag"]`（点路径提取列）
-
-## 与原 Python 版差异
-
-- 仅单文件查看，不管理数据目录树
-- 不做 SQLite
-- JSON 超过 400MB 不再流式解析，提示改用 JSONL
-- Excel 富样式能力受 SheetJS 社区版限制（合并/超链接/批注尽力支持）
