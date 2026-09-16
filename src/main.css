@@ -78,3 +78,22 @@ input:focus {
 .muted { color: var(--muted); }
 .faint { color: var(--faint); }
 .grow { flex: 1; }
+
+/* 滚动条跟随主题（深色模式不再是亮/白灰）。
+   Webkit/Chromium 用 ::-webkit-scrollbar；Firefox 用 scrollbar-color/width。 */
+* {
+  scrollbar-width: thin;
+  scrollbar-color: var(--border) transparent;
+}
+::-webkit-scrollbar { width: 11px; height: 11px; }
+::-webkit-scrollbar-track { background: transparent; }
+::-webkit-scrollbar-thumb {
+  background: var(--border);
+  border: 3px solid transparent;
+  border-radius: 8px;
+  background-clip: padding-box;
+  min-height: 28px;
+}
+::-webkit-scrollbar-thumb:hover { background: var(--faint); background-clip: padding-box; }
+::-webkit-scrollbar-thumb:active { background: var(--muted); background-clip: padding-box; }
+::-webkit-scrollbar-corner { background: transparent; }

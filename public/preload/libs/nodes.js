@@ -122,7 +122,12 @@ function cellStr(v) {
 /**
  * 子串/正则匹配。
  * where.__opt = { cs: 区分大小写, re: 正则 }；非法正则回退为字面子串。
+ * 字面量也编译成正则(needle 转义 + 大小写标识),避免对每个搜索串做 toLowerCase 拷贝。
  */
+function escapeRegex(s) {
+  return s.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')
+}
+
 function compileQuery(q, opt) {
   const s = String(q)
   const cs = !!(opt && opt.cs)
@@ -134,8 +139,11 @@ function compileQuery(q, opt) {
       // fall through to literal
     }
   }
-  const needle = cs ? s : s.toLowerCase()
-  return { lit: needle, cs }
+  try {
+    return { re: new RegExp(escapeRegex(s), cs ? '' : 'i') }
+  } catch {
+    return { lit: cs ? s : s.toLowerCase(), cs }
+  }
 }
 
 function textMatches(text, compiled) {
@@ -143,6 +151,25 @@ function textMatches(text, compiled) {
   if (compiled.re) return compiled.re.test(t)
   const hay = compiled.cs ? t : t.toLowerCase()
   return hay.includes(compiled.lit)
+}
+
+/** 对单值做匹配(标量直接 test；对象/数组递归遍历叶子,命中即短路,绝不整体 JSON.stringify) */
+function leafMatches(v, c) {
+  if (v == null) return false
+  if (typeof v === 'string') return c.re ? c.re.test(v) : textMatches(v, c)
+  if (typeof v === 'number' || typeof v === 'boolean') return c.re ? c.re.test(String(v)) : textMatches(String(v), c)
+  if (Array.isArray(v)) {
+    for (let i = 0; i < v.length; i++) if (leafMatches(v[i], c)) return true
+    return false
+  }
+  if (typeof v === 'object') {
+    for (const k of Object.keys(v)) {
+      if (c.re ? c.re.test(k) : textMatches(k, c)) return true
+      if (leafMatches(v[k], c)) return true
+    }
+    return false
+  }
+  return false
 }
 
 /** 空值查询 token：输入 "" 或 '' 或 ∅ 匹配 null / 空串 / 空数组 / 空对象 */
@@ -161,7 +188,7 @@ function isEmptyVal(v) {
 
 function queryHits(textOrVal, q, opt) {
   if (isEmptyToken(q)) return isEmptyVal(textOrVal)
-  return textMatches(cellStr(textOrVal), compileQuery(q, opt))
+  return leafMatches(textOrVal, compileQuery(q, opt))
 }
 
 function itemMatches(item, where, cols) {

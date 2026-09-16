@@ -9,6 +9,7 @@ const props = defineProps({
 const file = ref(null)
 const node = ref(null)
 const page = ref(null)
+const fnameRef = ref(null)
 const loading = ref(false)
 // 仅打开文件/钻取等重操作显示全屏加载；翻页/筛选静默，避免闪烁
 const heavyLoad = ref(false)
@@ -44,6 +45,7 @@ const modal = reactive({
   valueType: '',
   truncated: false,
   comment: '',
+  link: '',
   segs: null,
 })
 
@@ -207,6 +209,77 @@ function handleOpenDialog() {
   } catch (e) {
     error.value = e.message || String(e)
   }
+}
+
+/* ---- 拖拽打开文件 ---- */
+const dragOver = ref(false)
+let dragDepth = 0
+
+const DROP_EXTS = new Set(['json', 'jsonl', 'ndjson', 'csv', 'tsv', 'xlsx', 'xls'])
+
+function filePathOfDropped(file) {
+  if (!file) return ''
+  // Electron / uTools：File 上带绝对路径
+  if (file.path) return String(file.path)
+  // 新版 Chromium
+  try {
+    if (typeof window.webUtils?.getPathForFile === 'function') {
+      const p = window.webUtils.getPathForFile(file)
+      if (p) return String(p)
+    }
+  } catch { /* ignore */ }
+  // uTools 兼容
+  try {
+    if (typeof window.utools?.getFileSystemPath === 'function') {
+      const p = window.utools.getFileSystemPath(file)
+      if (p) return String(p)
+    }
+  } catch { /* ignore */ }
+  return ''
+}
+
+function isSupportedDropPath(p) {
+  const ext = String(p).split('.').pop().toLowerCase()
+  return DROP_EXTS.has(ext)
+}
+
+function onDragEnter(e) {
+  e.preventDefault()
+  dragDepth += 1
+  if (e.dataTransfer && Array.from(e.dataTransfer.types || []).includes('Files')) {
+    dragOver.value = true
+  }
+}
+
+function onDragOver(e) {
+  e.preventDefault()
+  if (e.dataTransfer) e.dataTransfer.dropEffect = 'copy'
+  dragOver.value = true
+}
+
+function onDragLeave(e) {
+  e.preventDefault()
+  dragDepth = Math.max(0, dragDepth - 1)
+  if (dragDepth === 0) dragOver.value = false
+}
+
+function onDrop(e) {
+  e.preventDefault()
+  dragDepth = 0
+  dragOver.value = false
+  const files = e.dataTransfer?.files
+  if (!files || !files.length) return
+  const f = files[0]
+  const p = filePathOfDropped(f)
+  if (!p) {
+    error.value = '无法获取文件路径，请改用「打开文件」选择'
+    return
+  }
+  if (!isSupportedDropPath(p)) {
+    error.value = '不支持的文件类型，支持：json / jsonl / csv / tsv / xlsx / xls'
+    return
+  }
+  openFile(p)
 }
 
 function navigateTo(list) {
@@ -424,12 +497,17 @@ function onRichCellClick(e, row, col) {
     return
   }
   const deco = cellDeco(row, col.name)
+  const link = deco && deco.link
   const expandable =
     isExpandable(row[col.name]) ||
-    !!(deco && (deco.link || deco.comment)) ||
+    !!link ||
+    !!(deco && deco.comment) ||
     isVisuallyTruncated(e.target.closest('td'))
   if (!expandable) return
-  openModal(parsePath(cellClickPath(row, col)), { comment: cellCommentOf(row, col.name) })
+  openModal(parsePath(cellClickPath(row, col)), {
+    link: link || '',
+    comment: cellCommentOf(row, col.name),
+  })
 }
 
 const visibleCols = computed(() => {
@@ -469,6 +547,7 @@ async function openModal(segsList, opts) {
   modal.valueType = ''
   modal.truncated = false
   modal.comment = opts.comment || ''
+  modal.link = opts.link || ''
   try {
     const data = services().record(file.value.file, serializePath(segsList))
     modal.value = data.value
@@ -561,6 +640,22 @@ function ensureResizeWatch() {
     resizeObs = new ResizeObserver(() => markTruncated())
   }
   if (tableWrap.value) resizeObs.observe(tableWrap.value)
+}
+
+/**
+ * 文件名自适应字号：太长先缩字号(16→14→12)尽量显示全，仍超则保持 ellipsis 截断。
+ * 下限 12px 保证可读；过长 hover title 看全名。
+ */
+function autoFitFname() {
+  const el = fnameRef.value
+  if (!el) return
+  el.style.fontSize = ''
+  const steps = [16, 15, 14, 13, 12]
+  for (const px of steps) {
+    el.style.fontSize = px + 'px'
+    if (el.scrollWidth <= el.clientWidth + 1) return
+  }
+  el.style.fontSize = '12px'
 }
 
 /* ---- Excel 富样式表格行列映射 ---- */
@@ -797,28 +892,47 @@ watch(() => props.enterAction, (action) => {
   }
 }, { immediate: true })
 
+watch(() => file.value, () => nextTick(autoFitFname))
+
+function onWinResize() { markTruncated(); autoFitFname() }
+
 onMounted(() => {
   document.addEventListener('click', onDocClick)
   document.addEventListener('mouseup', onMouseUpGlobal)
   document.addEventListener('keydown', onKeyDown)
-  window.addEventListener('resize', markTruncated)
+  window.addEventListener('resize', onWinResize)
+  document.addEventListener('dragenter', onDragEnter)
+  document.addEventListener('dragover', onDragOver)
+  document.addEventListener('dragleave', onDragLeave)
+  document.addEventListener('drop', onDrop)
 })
 
 onBeforeUnmount(() => {
   document.removeEventListener('click', onDocClick)
   document.removeEventListener('mouseup', onMouseUpGlobal)
   document.removeEventListener('keydown', onKeyDown)
-  window.removeEventListener('resize', markTruncated)
+  window.removeEventListener('resize', onWinResize)
+  document.removeEventListener('dragenter', onDragEnter)
+  document.removeEventListener('dragover', onDragOver)
+  document.removeEventListener('dragleave', onDragLeave)
+  document.removeEventListener('drop', onDrop)
   stopTimer()
 })
 </script>
 
 <template>
   <div class="viewer">
+    <div v-if="dragOver" class="drop-overlay">
+      <div class="drop-card">
+        <div class="drop-icon">⇩</div>
+        <div class="drop-title">松开以打开文件</div>
+        <div class="drop-hint">JSON / JSONL / CSV / TSV / Excel</div>
+      </div>
+    </div>
     <div class="topbar">
       <div class="file-meta">
         <template v-if="file">
-          <span class="fname" :title="file.file">{{ file.name }}</span>
+          <span class="fname" ref="fnameRef" :title="file.file">{{ file.name }}</span>
           <span class="tag">{{ typeLabel(file.category) }}</span>
           <span class="faint">{{ humanSize(file.size) }}</span>
         </template>
@@ -835,7 +949,7 @@ onBeforeUnmount(() => {
       </div>
       <div v-else-if="!file" class="empty">
         <div class="big">◎</div>
-        <div>选择 JSON / JSONL / CSV / Excel 文件开始查看</div>
+        <div>选择或拖入 JSON / JSONL / CSV / Excel 文件</div>
         <button class="btn primary" style="margin-top:14px" type="button" @click="handleOpenDialog">选择文件</button>
       </div>
 
@@ -1086,11 +1200,10 @@ onBeforeUnmount(() => {
                 <table v-else class="d rich">
                   <thead>
                     <tr>
-                      <th class="rownum" :style="page.header_bg ? { background: page.header_bg } : undefined">#</th>
+                      <th class="rownum">#</th>
                       <th
                         v-for="c in visibleCols"
                         :key="c.name"
-                        :style="page.header_bg ? { background: page.header_bg } : undefined"
                       >
                         <div class="col-tools">
                           <span :title="c.name">{{ c.name }}</span>
@@ -1112,7 +1225,6 @@ onBeforeUnmount(() => {
                       <td
                         class="rownum"
                         title="查看整行"
-                        :style="page.header_bg ? { background: page.header_bg } : undefined"
                         @click="openModal(parsePath(rowClickPath(r)))"
                       >{{ r._idx }}</td>
                       <template v-for="(c, ci) in richLayout.cols" :key="c.name">
@@ -1126,11 +1238,9 @@ onBeforeUnmount(() => {
                           :colspan="richLayout.anchors[`${ri},${ci}`]?.cc"
                           :class="{
                             clickable: isExpandable(r[c.name]) || !!(cellDeco(r, c.name)?.link || cellDeco(r, c.name)?.comment),
-                            'has-bg': !!(cellDeco(r, c.name)?.bg),
                             'has-cmt': !!cellCommentOf(r, c.name),
                             'cell-sel': isCellSelected(ri, ci),
                           }"
-                          :style="cellDeco(r, c.name)?.bg ? { background: cellDeco(r, c.name).bg } : undefined"
                           :title="cellCommentOf(r, c.name) || undefined"
                           @mousedown="onTdMouseDown($event, ri, ci)"
                           @click="onRichCellClick($event, r, c)"
@@ -1220,6 +1330,7 @@ onBeforeUnmount(() => {
       :value-type="modal.valueType"
       :truncated="modal.truncated"
       :comment="modal.comment"
+      :link="modal.link"
       @close="closeModal"
       @drill="drillFromModal"
     />
@@ -1232,6 +1343,44 @@ onBeforeUnmount(() => {
   display: flex;
   flex-direction: column;
   overflow: hidden;
+  position: relative;
+}
+
+.drop-overlay {
+  position: absolute;
+  inset: 0;
+  z-index: 200;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  background: color-mix(in srgb, var(--accent) 12%, var(--bg));
+  border: 2px dashed var(--accent);
+  pointer-events: none;
+}
+.drop-card {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: 6px;
+  padding: 28px 40px;
+  background: var(--panel);
+  border: 1px solid var(--border);
+  border-radius: 14px;
+  box-shadow: 0 12px 40px rgba(0, 0, 0, 0.12);
+}
+.drop-icon {
+  font-size: 28px;
+  color: var(--accent);
+  line-height: 1;
+}
+.drop-title {
+  font-size: 15px;
+  font-weight: 600;
+  color: var(--text);
+}
+.drop-hint {
+  font-size: 12px;
+  color: var(--muted);
 }
 
 .topbar {
@@ -1258,11 +1407,12 @@ onBeforeUnmount(() => {
 }
 .fname {
   font-weight: 600;
-  font-size: 16px;
+  font-size: 16px; /* 默认 16px；JS 按文件名长度自适应到 12px 下限 */
   white-space: nowrap;
   overflow: hidden;
   text-overflow: ellipsis;
-  max-width: 52vw;
+  min-width: 0;
+  max-width: 100%;
 }
 .btn {
   display: inline-flex;
@@ -1446,7 +1596,11 @@ table.d {
   position: sticky;
   top: 0;
   background: var(--panel);
-  z-index: 1;
+  z-index: 2; /* 表头需高于数据行号列(sticky-left),否则横向滚动时被行号列覆盖 */
+}
+.d th.rownum {
+  left: 0; /* 左上角交叉格:纵向+横向双向锁定 */
+  z-index: 3;
 }
 .d th .col-tools { display: flex; align-items: center; gap: 6px; }
 .d th .col-toggle { cursor: pointer; color: var(--faint); font-size: 13px; }

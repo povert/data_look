@@ -1,17 +1,28 @@
 /**
  * JSON backend
- * - ≤ MEM_LOAD_LIMIT（默认 2GB）：整文件解析，筛选/随机访问最快
- * - 更大文件：流式扫描根结构 + 元素偏移索引，分页/钻取按需读单条
+ * - 小文件(≤256MB):readFileSync+JSON.parse 快路径(单次 C 调用)
+ * - 中文件(估计堆 1.5×size ≤ 堆预算,默认 3.2GB):loadValue 单遍流式扫描+就地解析
+ *     ─ 整文件读成 Buffer(不受 V8 ~512MB 单字符串上限约束),原生 Uint8Array 索引循环
+ *       一遍找每个元素/标量边界并就地 JSON.parse,不构造整文件大字符串;
+ *       加载一次后筛选/分页/钻取全程内存访问,不再读原文件
+ * - 超预算大文件:偏移索引 + 按需解析(翻页/钻取 <60ms;新筛选整扫一次后缓存)
  */
 const fs = require('node:fs')
 const nodes = require('../nodes')
 const { parsePath } = require('../paths')
 const stream = require('../json-stream')
 
-const MEM_LOAD_LIMIT = (function () {
+// 默认堆预算:parse 后堆 ≈ 1.5× 文件大小,在此预算内走「加载一次→内存访问」,
+// 实测 1.54GB JSON → 2.28GB 堆,Node 默认堆放得下(uTools/Electron 同理甚至更宽)。
+// 超预算的大文件回退 stream 模式(按需解析:翻页/钻取 <50ms;新筛选整扫一次后缓存)。
+// 用 JSON_MEM_LIMIT 覆盖堆预算(字节);设极小值可强制走 stream(供测试)。
+const HEAP_FACTOR = 1.5
+const MEM_HEAP_BUDGET = (function () {
   const env = parseInt(process.env.JSON_MEM_LIMIT || '', 10)
-  return Number.isFinite(env) && env > 0 ? env : 2 * 1024 * 1024 * 1024
+  return Number.isFinite(env) && env > 0 ? env : 3.2 * 1024 * 1024 * 1024
 })()
+// 小文件直接 readFileSync+parse 更快且无扫描开销;阈值远低于 V8 ~512MB 单字符串上限。
+const FAST_PARSE_LIMIT = 256 * 1024 * 1024
 
 function stripBom(text) {
   if (text && text.charCodeAt(0) === 0xfeff) return text.slice(1)
@@ -31,16 +42,41 @@ class JsonBackend {
     this._stream = null // large-file index
     this._mode = 'memory'
 
-    if (size <= MEM_LOAD_LIMIT) {
-      try {
-        const buf = fs.readFileSync(filePath)
-        this._val = JSON.parse(stripBom(buf.toString('utf8')))
-        this._mode = 'memory'
-      } catch (e) {
-        this._val = null
-        this._loadError = e && e.message ? e.message : String(e)
+    // 路线选择:小文件快路径 / 中文件内存流式重建 / 大文件按需解析流式
+    const fitMemory = size * HEAP_FACTOR <= MEM_HEAP_BUDGET
+    const useFast = size <= FAST_PARSE_LIMIT
+    let loadedMemory = false
+    if (fitMemory) {
+      if (useFast) {
+        try {
+          const buf = fs.readFileSync(filePath)
+          this._val = JSON.parse(stripBom(buf.toString('utf8')))
+          this._mode = 'memory'
+          loadedMemory = true
+        } catch (e) {
+          this._val = null
+          this._loadError = e && e.message ? e.message : String(e)
+        }
+      } else {
+        // 单遍流式扫描+就地解析:整文件读成 Buffer(不受 512MB 单字符串限制),
+        // 原生 Uint8Array 循环一遍查找每个元素/标量的边界并就地 JSON.parse,
+        // 不构造整文件大字符串。相比 scan+buildValue 双遍,省掉一整遍全文件扫描。
+        try {
+          this._val = stream.loadValue(filePath)
+          if (this._val === null || this._val === undefined) {
+            this._val = null
+            this._loadError = '解析结果为空'
+          } else {
+            this._mode = 'memory'
+            loadedMemory = true
+          }
+        } catch (e) {
+          this._val = null
+          this._loadError = e && e.message ? e.message : String(e)
+        }
       }
-    } else {
+    }
+    if (!loadedMemory) {
       this._mode = 'stream'
       try {
         this._stream = stream.scanJsonFile(filePath, nodes.SAMPLE_N, true)

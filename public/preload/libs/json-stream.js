@@ -297,6 +297,43 @@ function readElementAt(fd, size, offsets, i) {
   return readSlice(fd, start, cur.pos)
 }
 
+/**
+ * 用一个 fd 把 scanJsonFile 的结果重建为完整 JS 根对象（in-memory 模式加载用）。
+ * 关键:逐个值 readSlice+JSON.parse,绝不构造整文件单字符串(否则超出 V8 ~512MB 单字符串上限)。
+ * - array 根:逐条 readElementAt
+ * - object 栁:按源序遍历 keys;标量取 scan.scalars、object 取 readSlice(start,end)、array 逐元素重建
+ * - scalar 根:scan.value
+ * scan 必须用 sampleN=0、indexArrays=true 产出(避免多余采样 parse)。
+ */
+function buildValue(fd, size, scan) {
+  if (!scan) return null
+  if (scan.root === 'array') {
+    const offsets = scan.offsets || []
+    const out = new Array(offsets.length)
+    for (let i = 0; i < offsets.length; i++) out[i] = readElementAt(fd, size, offsets, i)
+    return out
+  }
+  if (scan.root === 'object') {
+    const out = {}
+    for (const k of (scan.keys || [])) {
+      if (k.type === 'scalar') {
+        out[k.name] = (scan.scalars && k.name in scan.scalars) ? scan.scalars[k.name] : readSlice(fd, k.start, k.end)
+      } else if (k.type === 'array') {
+        const idx = scan.arrays && scan.arrays[k.name]
+        const offs = idx ? idx.offsets : []
+        const arr = new Array(offs.length)
+        for (let i = 0; i < offs.length; i++) arr[i] = readElementAt(fd, size, offs, i)
+        out[k.name] = arr
+      } else if (k.type === 'object') {
+        out[k.name] = readSlice(fd, k.start, k.end)
+      }
+    }
+    return out
+  }
+  // scalar root
+  return scan.value
+}
+
 module.exports = {
   Cursor,
   scanCompleteValue,
@@ -304,4 +341,120 @@ module.exports = {
   scanJsonFile,
   indexArrayAt,
   readElementAt,
+  buildValue,
+  loadValue,
+}
+
+/* ----------------------------------------------------------------------
+ * loadValue —— 大文件进内存模式的快路径:整文件读成 Buffer(不受 V8 ~512MB
+ * 单字符串上限约束),原生 Uint8Array 索引循环单遍扫描 + 就地 JSON.parse。
+ * 相比 scan+buildValue 双遍,省掉一整遍全文件扫描,且逐字节循环无函数调用开销。
+ * 解析仍按元素/标量切片(单切片 < PARSE_LIMIT 才整体 JSON.parse,否则对结构体
+ * 递归切片解析),绝不构造整文件大字符串。
+ * ---------------------------------------------------------------------- */
+const PARSE_LIMIT = 200 * 1024 * 1024
+
+function skipWsB(b, p, n) {
+  for (; p < n; p++) { const c = b[p]; if (c !== 0x20 && c !== 0x0a && c !== 0x0d && c !== 0x09) break }
+  return p
+}
+function strEndB(b, p, n) {
+  p++
+  for (; p < n; p++) { const c = b[p]; if (c === 0x5c) { p++; continue } if (c === 0x22) return p + 1 }
+  return n
+}
+function structEndB(b, p, n) {
+  const open = b[p]
+  const close = open === 0x7b ? 0x7d : 0x5d
+  let depth = 0, inStr = false
+  for (; p < n; p++) {
+    const c = b[p]
+    if (inStr) { if (c === 0x5c) { p++; continue } if (c === 0x22) inStr = false; continue }
+    if (c === 0x22) { inStr = true; continue }
+    if (c === open) depth++
+    else if (c === close) { depth--; if (depth === 0) return p + 1 }
+  }
+  return n
+}
+function scalarEndB(b, p, n) {
+  for (; p < n; p++) {
+    const c = b[p]
+    if (c === 0x2c || c === 0x7d || c === 0x5d || c === 0x20 || c === 0x0a || c === 0x0d || c === 0x09) return p
+  }
+  return n
+}
+function valueEndB(b, p, n) {
+  const c = b[p]
+  if (c === 0x22) return strEndB(b, p, n)
+  if (c === 0x7b || c === 0x5b) return structEndB(b, p, n)
+  return scalarEndB(b, p, n)
+}
+function loadArrayB(b, p, n) {
+  p++
+  const out = []
+  for (;;) {
+    p = skipWsB(b, p, n)
+    if (p >= n || b[p] === 0x5d) { if (p < n) p++; break }
+    const s = p
+    const c = b[p]
+    const e = valueEndB(b, p, n)
+    if (e - s >= PARSE_LIMIT && (c === 0x7b || c === 0x5b)) {
+      const r = c === 0x7b ? loadObjectB(b, s, n) : loadArrayB(b, s, n)
+      out.push(r.v); p = r.end
+    } else {
+      out.push(JSON.parse(b.subarray(s, e))); p = e
+    }
+    p = skipWsB(b, p, n)
+    if (p >= n) break
+    if (b[p] === 0x2c) { p++; continue }
+    if (b[p] === 0x5d) { p++; break }
+    break
+  }
+  return { v: out, end: p }
+}
+function loadObjectB(b, p, n) {
+  p++
+  const out = {}
+  for (;;) {
+    p = skipWsB(b, p, n)
+    if (p >= n || b[p] === 0x7d) { if (p < n) p++; break }
+    if (b[p] !== 0x22) break
+    const ks = p
+    const ke = strEndB(b, p, n)
+    const key = JSON.parse(b.subarray(ks, ke))
+    p = ke
+    p = skipWsB(b, p, n)
+    if (b[p] === 0x3a) p++
+    p = skipWsB(b, p, n)
+    const vs = p
+    const c = b[p]
+    if (c === 0x7b) {
+      // object:直接递归(自定限,返回 end)。绝不先 structEndB 整扫——否则对嵌套大对象/数组会与递归重复扫一遍。
+      const r = loadObjectB(b, vs, n); out[key] = r.v; p = r.end
+    } else if (c === 0x5b) {
+      const r = loadArrayB(b, vs, n); out[key] = r.v; p = r.end
+    } else {
+      // 字符串/标量:小切片,一次性 JSON.parse
+      const ve = valueEndB(b, vs, n)
+      out[key] = JSON.parse(b.subarray(vs, ve)); p = ve
+    }
+    p = skipWsB(b, p, n)
+    if (p >= n) break
+    if (b[p] === 0x2c) { p++; continue }
+    if (b[p] === 0x7d) { p++; break }
+    break
+  }
+  return { v: out, end: p }
+}
+function loadValue(filePath) {
+  const b = fs.readFileSync(filePath)
+  const n = b.length
+  let i = (n >= 3 && b[0] === 0xef && b[1] === 0xbb && b[2] === 0xbf) ? 3 : 0
+  i = skipWsB(b, i, n)
+  if (i >= n) return null
+  const c = b[i]
+  if (c === 0x5b) return loadArrayB(b, i, n).v
+  if (c === 0x7b) return loadObjectB(b, i, n).v
+  if (c === 0x22) return JSON.parse(b.subarray(i, strEndB(b, i, n))) // 根字符串(空格属串内)
+  return JSON.parse(b.subarray(i, scalarEndB(b, i, n))) // 数字/true/false/null
 }

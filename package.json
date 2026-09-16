@@ -4,7 +4,8 @@
     "dev": "vite",
     "build": "vite build",
     "test:backends": "node scripts/smoke-backends.cjs",
-    "test:services": "node scripts/smoke-services.cjs"
+    "test:services": "node scripts/smoke-services.cjs",
+    "test:loadvalue": "node scripts/smoke-loadvalue.cjs"
   },
   "dependencies": {
     "vue": "^3.5.13"

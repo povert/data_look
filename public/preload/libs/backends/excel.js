@@ -16,18 +16,6 @@ function colLetter(i) {
   return s
 }
 
-function fillRgb(cell) {
-  const s = cell && cell.s
-  if (!s) return null
-  const fill = s.fgColor || s.patternFill
-  if (fill && fill.rgb && fill.rgb !== '00000000' && fill.rgb.length >= 6) {
-    let rgb = fill.rgb
-    if (rgb.length === 8) rgb = rgb.slice(2)
-    return '#' + rgb
-  }
-  return null
-}
-
 class ExcelBackend {
   constructor(filePath, size, mtime) {
     this.category = 'excel'
@@ -104,13 +92,8 @@ class ExcelBackend {
           c1: mr.e.c - range.s.c,
         })
       }
-      // header bg
-      let headerBg = null
-      for (let c = range.s.c; c <= range.e.c; c++) {
-        const rgb = fillRgb(ws[colLetter(c) + String(header0 + 1)])
-        if (rgb) { headerBg = rgb; break }
-      }
-      // cell decorations for rich (links/comments/bg) — sample full sheet if small
+      // cell decorations for rich:只同步链接/备注/合并,不同步背景填充色
+      // (背景色多为原表为区别主题而设的浅色,深色模式与插件主题不符)。仅保留 link/comment。
       const cells = {}
       if (dataCount <= 5000) {
         for (let r = header0 + 1; r <= range.e.r; r++) {
@@ -119,8 +102,6 @@ class ExcelBackend {
             const cell = ws[colLetter(c) + String(r + 1)]
             if (!cell) continue
             const d = {}
-            const bg = fillRgb(cell)
-            if (bg) d.bg = bg
             if (cell.l && (cell.l.Target || cell.l)) {
               d.link = cell.l.Target || cell.l
             }
@@ -128,7 +109,7 @@ class ExcelBackend {
               const tx = (cell.c[0].t || '').trim()
               if (tx) d.comment = tx
             }
-            if (d.bg || d.link || d.comment) {
+            if (d.link || d.comment) {
               cells[`${ri},${c - range.s.c}`] = d
             }
           }
@@ -139,7 +120,6 @@ class ExcelBackend {
         count: dataCount,
         cols,
         merges,
-        header_bg: headerBg,
         cells,
         range: { sCol: range.s.c, sRow: range.s.r },
       }
@@ -260,7 +240,6 @@ class ExcelBackend {
       out.rich = true
       out.merges = sinfo.merges
       out.cells = sinfo.cells
-      out.header_bg = sinfo.header_bg
     }
     return out
   }
