@@ -13,9 +13,11 @@ const props = defineProps({
   truncated: { type: Boolean, default: false },
   comment: { type: String, default: '' },
   link: { type: String, default: '' },
+  /** 与主界面全局搜索同步：{ cs: 区分大小写, re: 正则 } */
+  searchOpts: { type: Object, default: () => ({ cs: false, re: false }) },
 })
 
-const emit = defineEmits(['close', 'drill'])
+const emit = defineEmits(['close', 'drill', 'toggle-opt'])
 
 const searchQ = ref('')
 const matchCount = ref(-1)
@@ -51,9 +53,7 @@ function reHighlight() {
   const body = document.querySelector('.jm-body')
   if (!body) return
   if (!searchQ.value || !searchQ.value.trim()) return
-  const needle = searchQ.value.trim()
-  const nl = needle.toLowerCase()
-  doHighlight(body, needle, nl, false)
+  doHighlight(body, searchQ.value.trim(), false)
 }
 
 const isLeafValue = computed(() => {
@@ -79,6 +79,14 @@ watch(() => props.open, (v) => {
     matchIdx.value = -1
     hitMarks = []
     treeForce.value = null
+  }
+})
+
+// 全局切换 cs/re 时，弹窗内已有搜索词则按新规则重搜
+watch(() => [props.searchOpts.cs, props.searchOpts.re], () => {
+  if (!props.open) return
+  if (searchQ.value && searchQ.value.trim()) {
+    nextTick(() => applySearch(searchQ.value, { gotoFirst: true }))
   }
 })
 
@@ -108,30 +116,67 @@ function applySearch(q, { gotoFirst = false } = {}) {
   if (!body) return
   if (!q || !q.trim()) return
   const needle = q.trim()
-  const nl = needle.toLowerCase()
 
-  // 对象/树值:命中若在折叠节点里则看不见也滚不动。
-  // 搜索时强制全展开,确保所有路径都渲染可见,再下一拍真正高亮+定位。
-  // 叶子值(<pre>)无需展开,直接搜。
   if (!isLeafValue.value && treeForce.value !== 'open') {
     treeForce.value = 'open'
-    nextTick(() => doHighlight(body, needle, nl, gotoFirst))
+    nextTick(() => doHighlight(body, needle, gotoFirst))
     return
   }
-  doHighlight(body, needle, nl, gotoFirst)
+  doHighlight(body, needle, gotoFirst)
 }
 
-function doHighlight(body, needle, nl, gotoFirst) {
-  // TreeWalker 收集所有可见文本节点(<pre> 叶子 + JsonTree 各 span)
+/** 按 searchOpts 构建匹配器。
+ * 正则 + 未开大小写 → flags 含 i（不区分大小写）
+ * 正则 + 开了大小写 → 不加 i
+ */
+function makeMatcher(needle) {
+  const cs = !!(props.searchOpts && props.searchOpts.cs)
+  const re = !!(props.searchOpts && props.searchOpts.re)
+  if (re) {
+    try {
+      return { regex: new RegExp(needle, cs ? 'g' : 'gi') }
+    } catch { /* invalid regex → literal below */ }
+  }
+  const lit = cs ? needle : needle.toLowerCase()
+  return { lit, cs }
+}
+
+function textNodeHits(text, m) {
+  // 返回 [{start, end}] 命中区间
+  const hits = []
+  if (m.regex) {
+    const re = new RegExp(m.regex.source, m.regex.flags.includes('g') ? m.regex.flags : m.regex.flags + 'g')
+    let match
+    let guard = 0
+    while ((match = re.exec(text)) !== null) {
+      if (match[0] === '') { re.lastIndex += 1; continue }
+      hits.push({ start: match.index, end: match.index + match[0].length })
+      if (++guard > 5000) break
+    }
+    return hits
+  }
+  const hay = m.cs ? text : text.toLowerCase()
+  const nl = m.cs ? m.lit : m.lit.toLowerCase()
+  let k = 0
+  while (k < hay.length) {
+    const at = hay.indexOf(nl, k)
+    if (at < 0) break
+    hits.push({ start: at, end: at + nl.length })
+    k = at + Math.max(1, nl.length)
+    if (hits.length > 5000) break
+  }
+  return hits
+}
+
+function doHighlight(body, needle, gotoFirst) {
+  const m = makeMatcher(needle)
   const walker = document.createTreeWalker(body, NodeFilter.SHOW_TEXT, {
     acceptNode(n) {
       const p = n.parentNode
       if (!p) return NodeFilter.FILTER_REJECT
-      // 跳过 <mark> 自身(避免重复处理)
       if (p.nodeName === 'MARK') return NodeFilter.FILTER_REJECT
-      if (!n.nodeValue || !n.nodeValue.toLowerCase().includes(nl)) {
-        return NodeFilter.FILTER_REJECT
-      }
+      if (!n.nodeValue) return NodeFilter.FILTER_REJECT
+      if (!textNodeHits(n.nodeValue, m).length) return NodeFilter.FILTER_REJECT
       return NodeFilter.FILTER_ACCEPT
     },
   })
@@ -142,28 +187,22 @@ function doHighlight(body, needle, nl, gotoFirst) {
 
   for (const tn of textNodes) {
     const text = tn.nodeValue
-    const low = text.toLowerCase()
+    const hits = textNodeHits(text, m)
+    if (!hits.length) continue
     const frag = document.createDocumentFragment()
-    let changed = false
     let k = 0
-    while (k < text.length) {
-      const at = low.indexOf(nl, k)
-      if (at < 0) {
-        frag.appendChild(document.createTextNode(text.slice(k)))
-        break
-      }
-      if (at > k) { frag.appendChild(document.createTextNode(text.slice(k, at))); changed = true }
-      changed = true
+    for (const h of hits) {
+      if (h.start > k) frag.appendChild(document.createTextNode(text.slice(k, h.start)))
       const mk = document.createElement('mark')
       mk.className = 'jm-hit'
-      mk.textContent = text.slice(at, at + needle.length)
+      mk.textContent = text.slice(h.start, h.end)
       frag.appendChild(mk)
       hitMarks.push(mk)
-      k = at + needle.length
-      // 保护:避免极端长文一次性产生海量 mark 拖慢
-      if (hitMarks.length > 5000) { frag.appendChild(document.createTextNode(text.slice(k))); break }
+      k = h.end
+      if (hitMarks.length > 5000) break
     }
-    if (changed) tn.parentNode.replaceChild(frag, tn)
+    if (k < text.length) frag.appendChild(document.createTextNode(text.slice(k)))
+    tn.parentNode.replaceChild(frag, tn)
   }
 
   matchCount.value = hitMarks.length
@@ -172,9 +211,8 @@ function doHighlight(body, needle, nl, gotoFirst) {
     hi()
   } else if (!hitMarks.length) {
     matchIdx.value = -1
-  } else {
-    // 保留当前位置点,但可能越界
-    if (matchIdx.value > hitMarks.length) matchIdx.value = hitMarks.length
+  } else if (matchIdx.value > hitMarks.length) {
+    matchIdx.value = hitMarks.length
   }
 }
 
@@ -226,10 +264,24 @@ function openLink(url) {
         <input
           v-model="searchQ"
           class="jm-search"
-          placeholder="在内容中搜索…"
+          :placeholder="searchOpts.re ? '搜索·正则…' : '在内容中搜索…'"
           @input="applySearch(searchQ, { gotoFirst: true })"
           @keydown.enter.prevent="matchShiftEnter($event)"
         />
+        <button
+          type="button"
+          class="opt-btn"
+          :class="{ on: searchOpts.cs }"
+          title="区分大小写（与全局同步）"
+          @click="emit('toggle-opt', 'cs')"
+        >Aa</button>
+        <button
+          type="button"
+          class="opt-btn"
+          :class="{ on: searchOpts.re }"
+          title="使用正则（与全局同步）"
+          @click="emit('toggle-opt', 're')"
+        >.*</button>
         <span v-if="matchCount >= 0" class="faint jm-count">{{ matchCount ? `${matchIdx > 0 ? matchIdx : '-'}/${matchCount}` : '无匹配' }}</span>
         <template v-if="matchCount > 0">
           <button class="btn sm jm-nav" type="button" title="上一个 (Enter 反向用 Shift+Enter)" @click="prevMatch()">‹</button>
@@ -311,9 +363,31 @@ function openLink(url) {
   font-size: 12px;
 }
 .jm-search {
-  width: 180px;
+  width: 160px;
   height: 28px;
   font-size: 12px;
+}
+.opt-btn {
+  min-width: 26px;
+  height: 24px;
+  padding: 0 4px;
+  border-radius: 5px;
+  font-size: 11px;
+  font-weight: 600;
+  font-family: var(--mono);
+  color: var(--faint);
+  background: transparent;
+  border: 1px solid transparent;
+}
+.opt-btn:hover {
+  color: var(--text);
+  background: var(--panel2);
+}
+.opt-btn.on {
+  background: var(--accent-soft);
+  color: var(--accent);
+  border-color: color-mix(in srgb, var(--accent) 40%, transparent);
+  font-weight: 700;
 }
 .jm-count {
   font-family: var(--mono);

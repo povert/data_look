@@ -322,8 +322,31 @@ function cancelEditPath() {
 function toggleSearchOpt(key) {
   searchOpts[key] = !searchOpts[key]
   offset.value = 0
+  // 有任意筛选词时立刻重查（全局 + 所有列共用同一套 cs/re）
   if (cleanWhere()) load()
 }
+
+const searchOptHint = computed(() => {
+  const scope = '全局 + 所有列筛选 + 单元格弹窗'
+  if (searchOpts.cs && searchOpts.re) return `区分大小写 · 正则 · 作用于${scope}`
+  if (searchOpts.cs) return `区分大小写 · 作用于${scope}`
+  if (searchOpts.re) return `正则匹配 · 作用于${scope}`
+  return `不区分大小写 · 子串匹配 · 作用于${scope}`
+})
+
+const colFilterPlaceholder = computed(() => {
+  if (searchOpts.re && searchOpts.cs) return '筛选·正则·区分大小写(回车)'
+  if (searchOpts.re) return '筛选·正则(回车；"" 空值)'
+  if (searchOpts.cs) return '筛选·区分大小写(回车；"" 空值)'
+  return '筛选(回车；"" 空值)…'
+})
+
+const globalSearchPlaceholder = computed(() => {
+  if (searchOpts.re && searchOpts.cs) return '全局·正则·区分大小写(回车)'
+  if (searchOpts.re) return '全局搜索·正则(回车)'
+  if (searchOpts.cs) return '全局搜索·区分大小写(回车)'
+  return '全局搜索（回车；"" 空值）'
+})
 
 function setLimit(v) {
   limit.value = parseInt(v, 10) || 50
@@ -1015,11 +1038,11 @@ onBeforeUnmount(() => {
           <span class="grow" />
           <template v-if="node && node.type === 'array'">
             <span class="faint hint-sel">拖选 · Ctrl+C 复制</span>
-            <div class="search-box">
+            <div class="search-box" :title="searchOptHint">
               <input
                 class="input sm"
                 style="width:150px"
-                placeholder='全局搜索（回车；"" 空值）'
+                :placeholder="globalSearchPlaceholder"
                 :value="where['*'] || ''"
                 @input="setGlobal($event.target.value)"
                 @keydown="filterKey($event, '*')"
@@ -1028,17 +1051,18 @@ onBeforeUnmount(() => {
                 type="button"
                 class="opt-btn"
                 :class="{ on: searchOpts.cs }"
-                title="区分大小写"
+                title="区分大小写（全局 + 所有列筛选）"
                 @click="toggleSearchOpt('cs')"
               >Aa</button>
               <button
                 type="button"
                 class="opt-btn"
                 :class="{ on: searchOpts.re }"
-                title="使用正则"
+                title="使用正则（全局 + 所有列筛选 + 单元格弹窗）"
                 @click="toggleSearchOpt('re')"
               >.*</button>
             </div>
+            <span class="faint opt-hint" :title="searchOptHint">{{ searchOptHint }}</span>
           </template>
         </div>
 
@@ -1134,7 +1158,9 @@ onBeforeUnmount(() => {
                         </div>
                         <input
                           class="col-search"
-                          placeholder='筛选（回车；"" 空值）…'
+                          :class="{ 'opt-on': searchOpts.cs || searchOpts.re }"
+                          :placeholder="colFilterPlaceholder"
+                          :title="searchOptHint"
                           :value="where[c.name] || ''"
                           @input="setColFilter(c.name, $event.target.value)"
                           @keydown="filterKey($event, c.name)"
@@ -1212,7 +1238,9 @@ onBeforeUnmount(() => {
                         </div>
                         <input
                           class="col-search"
-                          placeholder='筛选（回车；"" 空值）…'
+                          :class="{ 'opt-on': searchOpts.cs || searchOpts.re }"
+                          :placeholder="colFilterPlaceholder"
+                          :title="searchOptHint"
                           :value="where[c.name] || ''"
                           @input="setColFilter(c.name, $event.target.value)"
                           @keydown="filterKey($event, c.name)"
@@ -1331,8 +1359,10 @@ onBeforeUnmount(() => {
       :truncated="modal.truncated"
       :comment="modal.comment"
       :link="modal.link"
+      :search-opts="searchOpts"
       @close="closeModal"
       @drill="drillFromModal"
+      @toggle-opt="toggleSearchOpt"
     />
   </div>
 </template>
@@ -1550,9 +1580,21 @@ onBeforeUnmount(() => {
   background: var(--panel);
 }
 .opt-btn.on {
-  color: var(--accent);
   background: var(--accent-soft);
-  border-color: color-mix(in srgb, var(--accent) 35%, transparent);
+  color: var(--accent);
+  border-color: color-mix(in srgb, var(--accent) 40%, transparent);
+  font-weight: 700;
+}
+.opt-hint {
+  font-size: 11px;
+  max-width: 280px;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.col-search.opt-on {
+  border-color: color-mix(in srgb, var(--accent) 45%, var(--border));
+  background: color-mix(in srgb, var(--accent) 6%, var(--panel2));
 }
 
 .view-body {
