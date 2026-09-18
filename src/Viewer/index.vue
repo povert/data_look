@@ -419,9 +419,9 @@ function hideCol(name) {
   nextTick(() => markTruncated())
 }
 
-function toggleCol(name) {
+function setColVisible(name, visible) {
   const s = new Set(hidden.value)
-  if (s.has(name)) s.delete(name)
+  if (visible) s.delete(name)
   else s.add(name)
   hidden.value = s
   nextTick(() => markTruncated())
@@ -1017,15 +1017,18 @@ onBeforeUnmount(() => {
                     :key="c.name"
                     class="cp-row"
                     :class="{ off: hidden.has(c.name) }"
-                    @click.prevent="toggleCol(c.name)"
                   >
-                    <input type="checkbox" :checked="!hidden.has(c.name)" />
+                    <input
+                      type="checkbox"
+                      :checked="!hidden.has(c.name)"
+                      @change="setColVisible(c.name, $event.target.checked)"
+                    />
                     <span>{{ c.name }}</span>
                     <span class="tag">{{ c.type }}</span>
                     <span
                       v-if="extraPaths.includes(c.name)"
                       class="cp-x"
-                      @click.stop="removeExtract(c.name)"
+                      @click.stop.prevent="removeExtract(c.name)"
                     >✕</span>
                   </label>
                 </div>

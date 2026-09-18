@@ -60,12 +60,20 @@ class ExcelBackend {
       const colNames = []
       const sample = []
       const header0 = range.s.r
+      const usedNm = new Set()
       for (let c = range.s.c; c <= range.e.c; c++) {
         const addr = colLetter(c) + String(header0 + 1)
         const cell = ws[addr]
         const v = this._cellVal(cell)
         headerRow.push(v)
-        const nm = v != null && String(v).trim() ? String(v) : `col${c - range.s.c}`
+        const base = v != null && String(v).trim() ? String(v) : `col${c - range.s.c}`
+        // 表头可能重复（如两个「详细说明」），需唯一化，否则对象键互相覆盖、列错位
+        let nm = base
+        let n = 2
+        while (usedNm.has(nm)) {
+          nm = `${base}_${n++}`
+        }
+        usedNm.add(nm)
         colNames.push(nm)
       }
       const dataCount = Math.max(0, range.e.r - range.s.r)
