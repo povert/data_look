@@ -32,8 +32,10 @@ const editPathMode = ref(false)
 const editPathValue = ref('')
 const editPathEl = ref(null)
 
-// 全局搜索选项：区分大小写 / 正则（对全局 + 所有列筛选生效）
+// 全局搜索选项：区分大小写 / 正则（对全局 + 所有列筛选 + 单元格弹窗生效）
 const searchOpts = reactive({ cs: false, re: false })
+// 反向(!)是每个筛选框各自的开关：notMap['*']=全局框反向, notMap['列名']=该列反向
+const notMap = reactive({})
 
 const modal = reactive({
   open: false,
@@ -117,6 +119,7 @@ function humanSize(n) {
 
 function resetColState() {
   for (const k of Object.keys(where)) delete where[k]
+  for (const k of Object.keys(notMap)) delete notMap[k]
   extraPaths.value = []
   hidden.value = new Set()
   offset.value = 0
@@ -138,7 +141,12 @@ function cleanWhere() {
     }
   }
   if (any || searchOpts.cs || searchOpts.re) {
+    const nb = {}
+    for (const [k, v] of Object.entries(notMap)) {
+      if (v && out[k] != null) nb[k] = true
+    }
     out.__opt = { cs: searchOpts.cs, re: searchOpts.re }
+    if (Object.keys(nb).length) out.__opt.notByCol = nb
   }
   return any ? out : null
 }
@@ -192,6 +200,7 @@ function openFile(path, opts) {
     segs.value = opts.segs ? opts.segs.slice() : []
     resetColState()
     if (opts.where) Object.assign(where, opts.where)
+    if (opts.notMap) Object.assign(notMap, opts.notMap)
     load({ heavy: true })
   } catch (e) {
     error.value = e.message || String(e)
@@ -326,12 +335,21 @@ function toggleSearchOpt(key) {
   if (cleanWhere()) load()
 }
 
+// 反向(!)按筛选框独立：key='*' 为全局框,其它为列名；有词时翻转才需重查
+function toggleNot(key) {
+  notMap[key] = !notMap[key]
+  if (!notMap[key]) delete notMap[key]
+  offset.value = 0
+  if (where[key] != null && String(where[key]).trim()) load()
+}
+
 const searchOptHint = computed(() => {
   const scope = '全局 + 所有列筛选 + 单元格弹窗'
-  if (searchOpts.cs && searchOpts.re) return `区分大小写 · 正则 · 作用于${scope}`
-  if (searchOpts.cs) return `区分大小写 · 作用于${scope}`
-  if (searchOpts.re) return `正则匹配 · 作用于${scope}`
-  return `不区分大小写 · 子串匹配 · 作用于${scope}`
+  const parts = []
+  if (searchOpts.cs) parts.push('区分大小写')
+  if (searchOpts.re) parts.push('正则')
+  const head = parts.length ? parts.join(' · ') : '不区分大小写 · 子串匹配'
+  return `${head} · 作用于${scope}（cs/正则全局共享；! 按筛选框独立）`
 })
 
 const colFilterPlaceholder = computed(() => {
@@ -381,6 +399,7 @@ function filterKey(e, name) {
     load()
   } else if (e.key === 'Escape') {
     where[name] = ''
+    delete notMap[name]
     e.target.value = ''
     load()
   }
@@ -388,6 +407,7 @@ function filterKey(e, name) {
 
 function clearFilters() {
   for (const k of Object.keys(where)) delete where[k]
+  for (const k of Object.keys(notMap)) delete notMap[k]
   offset.value = 0
   load()
 }
@@ -1061,6 +1081,13 @@ onBeforeUnmount(() => {
                 title="使用正则（全局 + 所有列筛选 + 单元格弹窗）"
                 @click="toggleSearchOpt('re')"
               >.*</button>
+              <button
+                type="button"
+                class="opt-btn"
+                :class="{ on: notMap['*'] }"
+                title="反向筛选（仅本全局框）：显示“不包含/不匹配”该词的行"
+                @click="toggleNot('*')"
+              >!</button>
             </div>
             <span class="faint opt-hint" :title="searchOptHint">{{ searchOptHint }}</span>
           </template>
@@ -1156,15 +1183,24 @@ onBeforeUnmount(() => {
                           <span class="tag type">{{ c.type }}</span>
                           <span class="col-toggle" title="隐藏该列" @click="hideCol(c.name)">⊘</span>
                         </div>
-                        <input
-                          class="col-search"
-                          :class="{ 'opt-on': searchOpts.cs || searchOpts.re }"
-                          :placeholder="colFilterPlaceholder"
-                          :title="searchOptHint"
-                          :value="where[c.name] || ''"
-                          @input="setColFilter(c.name, $event.target.value)"
-                          @keydown="filterKey($event, c.name)"
-                        />
+                        <div class="col-filter-row">
+                          <input
+                            class="col-search"
+                            :class="{ 'opt-on': searchOpts.cs || searchOpts.re || notMap[c.name] }"
+                            :placeholder="colFilterPlaceholder"
+                            :title="searchOptHint"
+                            :value="where[c.name] || ''"
+                            @input="setColFilter(c.name, $event.target.value)"
+                            @keydown="filterKey($event, c.name)"
+                          />
+                          <button
+                            type="button"
+                            class="opt-btn col-not"
+                            :class="{ on: notMap[c.name] }"
+                            title="反向筛选（仅本列）：显示“不包含/不匹配”该词的行"
+                            @click="toggleNot(c.name)"
+                          >!</button>
+                        </div>
                       </th>
                     </tr>
                   </thead>
@@ -1236,15 +1272,24 @@ onBeforeUnmount(() => {
                           <span class="tag type">{{ c.type }}</span>
                           <span class="col-toggle" title="隐藏该列" @click="hideCol(c.name)">⊘</span>
                         </div>
-                        <input
-                          class="col-search"
-                          :class="{ 'opt-on': searchOpts.cs || searchOpts.re }"
-                          :placeholder="colFilterPlaceholder"
-                          :title="searchOptHint"
-                          :value="where[c.name] || ''"
-                          @input="setColFilter(c.name, $event.target.value)"
-                          @keydown="filterKey($event, c.name)"
-                        />
+                        <div class="col-filter-row">
+                          <input
+                            class="col-search"
+                            :class="{ 'opt-on': searchOpts.cs || searchOpts.re || notMap[c.name] }"
+                            :placeholder="colFilterPlaceholder"
+                            :title="searchOptHint"
+                            :value="where[c.name] || ''"
+                            @input="setColFilter(c.name, $event.target.value)"
+                            @keydown="filterKey($event, c.name)"
+                          />
+                          <button
+                            type="button"
+                            class="opt-btn col-not"
+                            :class="{ on: notMap[c.name] }"
+                            title="反向筛选（仅本列）：显示“不包含/不匹配”该词的行"
+                            @click="toggleNot(c.name)"
+                          >!</button>
+                        </div>
                       </th>
                     </tr>
                   </thead>
@@ -1688,9 +1733,27 @@ table.d {
   width: 100%;
   font-size: 10.5px;
   padding: 3px 6px;
-  margin-top: 4px;
   border: 1px solid var(--border);
   border-radius: 6px;
+}
+/* 列筛选框：input + 各自独立的 ! 反向按钮 */
+.col-filter-row {
+  display: flex;
+  align-items: center;
+  gap: 2px;
+  margin-top: 4px;
+}
+.col-filter-row .col-search {
+  flex: 1;
+  min-width: 0;
+}
+.opt-btn.col-not {
+  min-width: 20px;
+  height: 22px;
+  padding: 0 4px;
+  font-size: 14px;
+  line-height: 1;
+  flex: none;
 }
 .cell-null { color: var(--faint); font-style: italic; font-size: 11px; }
 .cell-num, .cell-bool { font-family: var(--mono); }

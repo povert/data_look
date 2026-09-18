@@ -85,7 +85,15 @@ function cleanWhere(where) {
   for (const [k, v] of Object.entries(where)) {
     if (k === '__opt') {
       if (v && typeof v === 'object') {
-        out.__opt = { cs: !!v.cs, re: !!v.re }
+        const o = { cs: !!v.cs, re: !!v.re }
+        if (v.notByCol && typeof v.notByCol === 'object') {
+          const nb = {}
+          for (const [nk, nv] of Object.entries(v.notByCol)) {
+            if (nv) nb[nk] = true
+          }
+          if (Object.keys(nb).length) o.notByCol = nb
+        }
+        out.__opt = o
       }
       continue
     }

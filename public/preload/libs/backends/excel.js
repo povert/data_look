@@ -173,7 +173,7 @@ class ExcelBackend {
   }
 
   _matchedIdxes(sheet, where, cols) {
-    const key = sheet + '|' + JSON.stringify(where, Object.keys(where).sort())
+    const key = sheet + '|' + JSON.stringify(where)
     if (this._filterCache.has(key)) return this._filterCache.get(key)
     const arr = this._allRows(sheet)
     const out = []

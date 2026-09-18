@@ -136,7 +136,7 @@ class CsvBackend {
   }
 
   _matchedIdxes(where, cols) {
-    const wkey = JSON.stringify(where, Object.keys(where).sort())
+    const wkey = JSON.stringify(where)
     if (this._filterCache.has(wkey)) return this._filterCache.get(wkey)
     const m = this._ensureMeta()
     const out = []

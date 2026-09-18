@@ -95,7 +95,7 @@ class JsonlBackend {
   }
 
   _matchedIdxes(where, cols) {
-    const wkey = JSON.stringify(where, Object.keys(where).sort())
+    const wkey = JSON.stringify(where)
     if (this._filterCache.has(wkey)) return this._filterCache.get(wkey)
     this._ensureIndex()
     const out = []

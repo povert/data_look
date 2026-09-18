@@ -187,7 +187,7 @@ class JsonBackend {
   }
 
   _matchedIdxes(arr, where, cols) {
-    const wkey = JSON.stringify(where, Object.keys(where).sort())
+    const wkey = JSON.stringify(where)
     if (this._filterCache.has(wkey)) return this._filterCache.get(wkey)
     const out = []
     for (let i = 0; i < arr.length; i++) {
@@ -199,7 +199,7 @@ class JsonBackend {
   }
 
   _matchedOffsets(offsets, where, cols) {
-    const wkey = 'off:' + JSON.stringify(where, Object.keys(where).sort())
+    const wkey = 'off:' + JSON.stringify(where)
     if (this._filterCache.has(wkey)) return this._filterCache.get(wkey)
     const fd = fs.openSync(this.path, 'r')
     const out = []

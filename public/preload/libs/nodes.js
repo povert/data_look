@@ -120,91 +120,131 @@ function cellStr(v) {
 }
 
 /**
- * 子串/正则匹配。
- * where.__opt = { cs: 区分大小写, re: 正则 }；非法正则回退为字面子串。
- * 字面量也编译成正则(needle 转义 + 大小写标识),避免对每个搜索串做 toLowerCase 拷贝。
+ * 匹配核心 —— 与参考实现 scripts/filter_ref.py 行为一致（用户勾选的"正确语义"）。
+ *  - 值统一用 pyStr() 字符串化（list/dict 取 Python repr 格式：含逗号后空格、单引号；
+ *    bool -> True/False；顶层 null -> ''），而非递归叶子匹配 —— 这样 errors=[] 能被
+ *    `\[\]` 命中、值里的 [ ] / { } 括号也可被正则匹配，与 Python str() 一致。
+ *  - 空值搜索用 Python 真值（null / 0 / 0.0 / False / '' / [] / {} 均视为"空"）。
+ *      UI 约定：留空框 = 该列不筛选；输入 "" / '' / ∅ = 找空值（对应 Python search=None/''）。
+ *  - 不区分大小写(cs=false)时，仅把 value 转小写、search 保持原样 —— 与 Python 一致
+ *      （Python `re.compile(search)` 不加 re.I，只对 parten 做 .lower()）。注意：大小写不敏感
+ *      时若搜索词含大写字母，需小写才能命中（Python 的同款行为）。
+ *  - 反向(!)：每个筛选框各自取反后按 AND 组合。__opt.notByCol[key] 为真则该框"不匹配"才命中。
+ *  where.__opt = { cs: 区分大小写, re: 正则, notByCol: {key: true} }；非法正则回退为字面子串。
  */
 function escapeRegex(s) {
   return s.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')
 }
 
-function compileQuery(q, opt) {
-  const s = String(q)
-  const cs = !!(opt && opt.cs)
-  const re = !!(opt && opt.re)
-  if (re) {
-    try {
-      return { re: new RegExp(s, cs ? '' : 'i') }
-    } catch {
-      // fall through to literal
-    }
-  }
-  try {
-    return { re: new RegExp(escapeRegex(s), cs ? '' : 'i') }
-  } catch {
-    return { lit: cs ? s : s.toLowerCase(), cs }
-  }
+function pyNum(n) {
+  if (Number.isNaN(n)) return 'nan'
+  if (n === Infinity) return 'inf'
+  if (n === -Infinity) return '-inf'
+  if (Number.isInteger(n)) return String(n)
+  return String(n) // 与 Python str(1.5) 一致；整数浮点如 1.0 会得 '1'（罕见, 可接受）
 }
 
-function textMatches(text, compiled) {
-  const t = String(text == null ? '' : text)
-  if (compiled.re) return compiled.re.test(t)
-  const hay = compiled.cs ? t : t.toLowerCase()
-  return hay.includes(compiled.lit)
+// Python 字符串 repr 的选引号启发式：含 ' 但不含 " 时用 " 包裹，否则用 ' 包裹并转义 '
+function pyQuote(s) {
+  if (s.indexOf("'") !== -1 && s.indexOf('"') === -1) {
+    return '"' + s.replace(/\\/g, '\\\\').replace(/"/g, '\\"') + '"'
+  }
+  return "'" + s.replace(/\\/g, '\\\\').replace(/'/g, "\\'") + "'"
 }
 
-/** 对单值做匹配(标量直接 test；对象/数组递归遍历叶子,命中即短路,绝不整体 JSON.stringify) */
-function leafMatches(v, c) {
-  if (v == null) return false
-  if (typeof v === 'string') return c.re ? c.re.test(v) : textMatches(v, c)
-  if (typeof v === 'number' || typeof v === 'boolean') return c.re ? c.re.test(String(v)) : textMatches(String(v), c)
-  if (Array.isArray(v)) {
-    for (let i = 0; i < v.length; i++) if (leafMatches(v[i], c)) return true
-    return false
-  }
+// 容器内部元素用 repr（字符串加引号、None -> 'None' 等）
+function pyRepr(v) {
+  if (v == null) return 'None' // 容器内 None；顶层 None 由 pyStr 转为 ''
+  if (typeof v === 'boolean') return v ? 'True' : 'False'
+  if (typeof v === 'number') return pyNum(v)
+  if (typeof v === 'string') return pyQuote(v)
+  if (Array.isArray(v)) return '[' + v.map(pyRepr).join(', ') + ']'
   if (typeof v === 'object') {
-    for (const k of Object.keys(v)) {
-      if (c.re ? c.re.test(k) : textMatches(k, c)) return true
-      if (leafMatches(v[k], c)) return true
-    }
-    return false
+    return '{' + Object.keys(v).map(k => pyRepr(k) + ': ' + pyRepr(v[k])).join(', ') + '}'
   }
-  return false
+  return String(v)
 }
 
-/** 空值查询 token：输入 "" 或 '' 或 ∅ 匹配 null / 空串 / 空数组 / 空对象 */
+// 顶层 str()：None -> ''（与参考的 `if parten is None: parten = ''` 一致）;
+// list/dict 的 str 与 repr 相同；string 为其自身；bool -> True/False。
+function pyStr(v) {
+  if (v == null) return ''
+  if (typeof v === 'boolean') return v ? 'True' : 'False'
+  if (typeof v === 'number') return pyNum(v)
+  if (typeof v === 'string') return v
+  if (Array.isArray(v)) return '[' + v.map(pyRepr).join(', ') + ']'
+  if (typeof v === 'object') {
+    return '{' + Object.keys(v).map(k => pyRepr(k) + ': ' + pyRepr(v[k])).join(', ') + '}'
+  }
+  return String(v)
+}
+
+// Python 真值：null/0/0.0/False/''/[]/{} 为假，其余为真（与 `not parten` 等价）
+function pyTruthy(v) {
+  if (v == null) return false
+  if (typeof v === 'boolean') return v
+  if (typeof v === 'number') return v !== 0
+  if (typeof v === 'string') return v.length > 0
+  if (Array.isArray(v)) return v.length > 0
+  if (typeof v === 'object') return Object.keys(v).length > 0
+  return !!v
+}
+
+/** 空值查询 token：输入 "" / '' / ∅ 表示"找空值"（对应 Python search=None/''） */
 function isEmptyToken(q) {
   const s = String(q == null ? '' : q).trim()
   return s === '""' || s === "''" || s === '∅'
 }
 
-function isEmptyVal(v) {
-  if (v == null) return true
-  if (typeof v === 'string' && v === '') return true
-  if (Array.isArray(v) && v.length === 0) return true
-  if (v && typeof v === 'object' && !Array.isArray(v) && Object.keys(v).length === 0) return true
-  return false
-}
-
-function queryHits(textOrVal, q, opt) {
-  if (isEmptyToken(q)) return isEmptyVal(textOrVal)
-  return leafMatches(textOrVal, compileQuery(q, opt))
+// 单框单值"是否命中"（不含反向；反向由 itemMatches 用 neg 套用）。
+// 空值搜索：is_ex=false -> 命中空值；is_ex=true(由 neg 体现) -> 命中非空值。
+// 非空搜索：子串/正则搜 pyStr(value)；大小写不敏感时只把 value 转小写、search 保持原样。
+function valueHits(value, search, opt) {
+  if (isEmptyToken(search)) return !pyTruthy(value)
+  const s = pyStr(value)
+  const ci = !opt || !opt.cs
+  // 不区分大小写：value 与 search 都转小写后比较（修正：搜索词也要小写，避免大写 pattern 在小写 haystack 里漏匹配）
+  const hay = ci ? s.toLowerCase() : s
+  const needle = ci ? String(search).toLowerCase() : search
+  if (opt && opt.re) {
+    try {
+      return new RegExp(needle).test(hay) // 待搜串已全小写，pattern 无需 'i' 旗标
+    } catch {
+      return hay.indexOf(needle) !== -1 // 非法正则回退为字面子串
+    }
+  }
+  return hay.indexOf(needle) !== -1
 }
 
 function itemMatches(item, where, cols) {
   if (!where) return true
   const opt = where.__opt || {}
+  // 按筛选框({列名}/"*" 全局)各自取反：notByCol[key] 为真则该框"不匹配"才命中
+  const notByCol = opt.notByCol || {}
   const nameMap = {}
   for (const c of cols) nameMap[c.name] = c
+  // 全局 '*'：与 Python 一致 —— 任一顶层 key 的值(pyStr)命中即保留
   const gq = where['*']
-  if (gq && String(gq).trim()) {
-    if (!queryHits(item, gq, opt)) return false
+  if (gq != null && String(gq).trim()) {
+    const neg = !!notByCol['*']
+    let hit = false
+    if (item && typeof item === 'object' && !Array.isArray(item)) {
+      for (const k of Object.keys(item)) {
+        if (valueHits(item[k], gq, opt)) { hit = true; break }
+      }
+    } else {
+      hit = valueHits(item, gq, opt)
+    }
+    if (neg ? hit : !hit) return false
   }
+  // 逐列(各自可反向),AND 组合
   for (const [k, v] of Object.entries(where)) {
     if (k === '*' || k === '__opt' || v == null || !String(v).trim()) continue
+    const neg = !!notByCol[k]
     const c = nameMap[k]
     const val = c ? colValue(item, c) : null
-    if (!queryHits(val, v, opt)) return false
+    const hit = valueHits(val, v, opt)
+    if (neg ? hit : !hit) return false
   }
   return true
 }
