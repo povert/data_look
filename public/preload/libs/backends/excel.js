@@ -93,11 +93,14 @@ class ExcelBackend {
       for (const mr of (ws['!merges'] || [])) {
         // mr.s.r is absolute sheet row; data row = mr.s.r - (header0+1)
         if (mr.s.r <= header0) continue
+        // 合并区左上角单元格的值（横向合并时其余格为空，显示需靠它）
+        const aCell = ws[colLetter(mr.s.c) + String(mr.s.r + 1)]
         merges.push({
           r: mr.s.r - header0 - 1,
           c: mr.s.c - range.s.c,
           r1: mr.e.r - header0 - 1,
           c1: mr.e.c - range.s.c,
+          anchor_val: this._cellVal(aCell),
         })
       }
       // cell decorations for rich:只同步链接/备注/合并,不同步背景填充色

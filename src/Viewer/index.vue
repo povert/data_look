@@ -713,10 +713,16 @@ const richLayout = computed(() => {
   const anchors = {}
   const occupied = new Set()
   for (const mg of (page.value.merges || [])) {
-    const visCol = visAbs.indexOf(mg.c)
-    if (visCol < 0) continue
-    const cc = visAbs.filter(a => a >= mg.c && a <= mg.c1).length
-    if (cc < 1) continue
+    // 合并区在可见列上的跨度；锚点列被隐藏时用区间内第一列可见格显示
+    let visCol = -1
+    let cc = 0
+    for (let vi = 0; vi < visAbs.length; vi++) {
+      const a = visAbs[vi]
+      if (a < mg.c || a > mg.c1) continue
+      if (visCol < 0) visCol = vi
+      cc++
+    }
+    if (visCol < 0 || cc < 1) continue
     const rStart = Math.max(mg.r, off)
     const rEnd = Math.min(mg.r1, off + rows.length - 1)
     if (rEnd < rStart) continue
@@ -724,8 +730,10 @@ const richLayout = computed(() => {
     const ar = {
       rr: rEnd - rStart + 1,
       cc,
-      cont: mg.r < off,
-      val: mg.r < off ? mg.anchor_val : null,
+      cont: mg.r < off || visAbs[visCol] !== mg.c,
+      absC: mg.c,
+      absR: mg.r,
+      val: mg.anchor_val !== undefined ? mg.anchor_val : null,
       deco: (page.value.cells && page.value.cells[`${mg.r},${mg.c}`]) || null,
     }
     anchors[`${rIdx},${visCol}`] = ar
@@ -738,25 +746,124 @@ const richLayout = computed(() => {
   return { visAbs, off, rows, anchors, occupied, cols, all }
 })
 
+/** 合并格显示值：优先数据行，否则用 Excel 合并区左上角的值 */
+function richCellVal(r, ri, ci, c) {
+  const lay = richLayout.value
+  const ar = lay && lay.anchors[`${ri},${ci}`]
+  const direct = r ? r[c.name] : null
+  if (!ar) return direct
+  if (direct != null && direct !== '') return direct
+  if (ar.val != null && ar.val !== '') return ar.val
+  const aCol = lay.all[ar.absC]
+  if (aCol && ar.absR >= lay.off) {
+    const aRow = lay.rows[ar.absR - lay.off]
+    if (aRow && aRow[aCol.name] != null && aRow[aCol.name] !== '') return aRow[aCol.name]
+  }
+  return direct
+}
+
+function richIsMerge(ri, ci) {
+  const ar = richLayout.value && richLayout.value.anchors[`${ri},${ci}`]
+  return !!(ar && (ar.rr > 1 || ar.cc > 1))
+}
+
+function richRowspan(ri, ci) {
+  const ar = richLayout.value && richLayout.value.anchors[`${ri},${ci}`]
+  return ar && ar.rr > 1 ? ar.rr : undefined
+}
+
+function richColspan(ri, ci) {
+  const ar = richLayout.value && richLayout.value.anchors[`${ri},${ci}`]
+  return ar && ar.cc > 1 ? ar.cc : undefined
+}
+
 function onTdMouseDown(e, ri, ci) {
   if (e.target.closest('input,textarea,.col-toggle')) return
   const td = e.target.closest('td[data-ri]')
   if (!td) return
   selState.down = true
   selState.dragMoved = false
-  selState.active = false
+  selState.active = true
   selState.r0 = selState.r1 = ri
   selState.c0 = selState.c1 = ci
   selState.sx = e.clientX
   selState.sy = e.clientY
-  // 不用 preventDefault：避免干扰 click，改为 mousemove 超过阈值再进入拖选
+  selAdditive.value = !!(e.ctrlKey || e.metaKey)
+}
+
+/** 已提交的选区块（Ctrl 可叠加多块） */
+const selRanges = ref([])
+const selAdditive = ref(false)
+
+function rawNorm() {
+  return {
+    r0: Math.min(selState.r0, selState.r1),
+    r1: Math.max(selState.r0, selState.r1),
+    c0: Math.min(selState.c0, selState.c1),
+    c1: Math.max(selState.c0, selState.c1),
+  }
+}
+
+function applySel(r0, r1, c0, c1, msg, opts) {
+  const nRows = page.value?.rows?.length || 0
+  const nCols = visibleCols.value.length
+  if (!nRows || !nCols) return
+  const expanded = expandSelByMerges({ r0, r1, c0, c1 }, opts)
+  const additive = !!(opts && opts.additive) && selRanges.value.length > 0
+  selRanges.value = additive ? [...selRanges.value, expanded] : [expanded]
+  selState.down = false
+  selState.dragMoved = false
+  selState.active = false
+  selAdditive.value = false
+  flashToast(msg || toastForRanges())
+}
+
+function toastForRanges() {
+  const rs = selRanges.value
+  if (!rs.length) return ''
+  if (rs.length === 1) {
+    const r = rs[0]
+    return `已选 ${r.r1 - r.r0 + 1} 行 × ${r.c1 - r.c0 + 1} 列 · Ctrl+C 复制`
+  }
+  return `已叠加 ${rs.length} 块选区 · Ctrl+C 复制`
+}
+
+/** 长按行号选整行；单击行号仍打开整行详情 */
+function selectRow(ri, e) {
+  const nCols = visibleCols.value.length
+  if (!nCols || ri == null || ri < 0) return
+  applySel(ri, ri, 0, nCols - 1, null, {
+    additive: !!(e && (e.ctrlKey || e.metaKey)),
+    noRowExpand: true,
+  })
+}
+
+/** 点列头名称选整列；禁止横向扩成全表（整行合并表头不能把列选撑开） */
+function selectCol(ci, e) {
+  const nRows = page.value?.rows?.length || 0
+  if (!nRows || ci == null || ci < 0) return
+  applySel(0, nRows - 1, ci, ci, null, {
+    additive: !!(e && (e.ctrlKey || e.metaKey)),
+    noColExpand: true,
+  })
+}
+
+/** 点左上角 #：选当前页全部 */
+function selectAll(e) {
+  const nRows = page.value?.rows?.length || 0
+  const nCols = visibleCols.value.length
+  if (!nRows || !nCols) return
+  applySel(0, nRows - 1, 0, nCols - 1, null, {
+    additive: !!(e && (e.ctrlKey || e.metaKey)),
+    noColExpand: true,
+    noRowExpand: true,
+  })
 }
 
 function onTableMouseMove(e) {
   if (!selState.down) return
   if (!selState.dragMoved && Math.hypot(e.clientX - selState.sx, e.clientY - selState.sy) < 4) return
   selState.dragMoved = true
-  selState.active = true
   const el = document.elementFromPoint(e.clientX, e.clientY)
   const td = el && el.closest && el.closest('td[data-ri]')
   if (td && tableWrap.value && tableWrap.value.contains(td)) {
@@ -771,34 +878,150 @@ function onTableMouseMove(e) {
 
 function onMouseUpGlobal() {
   if (!selState.down) return
+  const moved = selState.dragMoved
+  const additive = selAdditive.value
   selState.down = false
-  if (!selState.dragMoved) {
-    if (selState.active) flashToast('已选 1 格 · Ctrl+C 复制')
+  selState.dragMoved = false
+  if (!moved) {
+    // 单击单元格：非 Ctrl 时清空选区
+    if (!additive) selRanges.value = []
+    selState.active = false
+    selAdditive.value = false
     return
   }
-  const n = selNorm()
-  flashToast(`已选 ${n.r1 - n.r0 + 1} 行 × ${n.c1 - n.c0 + 1} 列 · Ctrl+C 复制`)
+  const cur = expandSelByMerges(rawNorm())
+  if (additive && selRanges.value.length) {
+    selRanges.value = [...selRanges.value, cur]
+  } else {
+    selRanges.value = [cur]
+  }
+  selState.active = false
+  selAdditive.value = false
+  flashToast(toastForRanges())
 }
 
-function selNorm() {
-  return {
-    r0: Math.min(selState.r0, selState.r1),
-    r1: Math.max(selState.r0, selState.r1),
-    c0: Math.min(selState.c0, selState.c1),
-    c1: Math.max(selState.c0, selState.c1),
+let lpTimer = null
+let lpFired = false
+
+function clearLongPress() {
+  if (lpTimer) {
+    clearTimeout(lpTimer)
+    lpTimer = null
   }
 }
 
+function onRowNumDown(e, ri) {
+  lpFired = false
+  clearLongPress()
+  const additive = !!(e.ctrlKey || e.metaKey)
+  lpTimer = setTimeout(() => {
+    lpFired = true
+    selectRow(ri, { ctrlKey: additive, metaKey: false })
+  }, 450)
+}
+
+function onRowNumUp(e, ri, r) {
+  clearLongPress()
+  if (lpFired) {
+    lpFired = false
+    return
+  }
+  openModal(parsePath(rowClickPath(r)))
+}
+
+function onRowNumLeave() {
+  clearLongPress()
+}
+
+/** 当前页可见的合并块（相对行列），只在 page/列显隐变化时重算一次 */
+const pageMergeBoxes = computed(() => {
+  if (!isRichTable.value || !page.value?.merges?.length) return []
+  const lay = richLayout.value
+  if (!lay) return []
+  const { off, visAbs, rows } = lay
+  const nRows = rows.length
+  if (!nRows || !visAbs.length) return []
+  const out = []
+  for (const mg of page.value.merges) {
+    let mC0 = -1
+    let mC1 = -1
+    for (let vi = 0; vi < visAbs.length; vi++) {
+      const a = visAbs[vi]
+      if (a < mg.c || a > mg.c1) continue
+      if (mC0 < 0) mC0 = vi
+      mC1 = vi
+    }
+    if (mC0 < 0) continue
+    const rA = mg.r - off
+    const rB = mg.r1 - off
+    if (rB < 0 || rA > nRows - 1) continue
+    out.push({
+      r0: Math.max(0, rA),
+      r1: Math.min(nRows - 1, rB),
+      c0: mC0,
+      c1: mC1,
+    })
+  }
+  return out
+})
+
+/**
+ * 选区与合并块相交时扩展。
+ * opts.noColExpand / noRowExpand：整列/整选时禁止被整行合并表头撑成全表。
+ */
+function expandSelByMerges(n, opts) {
+  const noCol = !!(opts && opts.noColExpand)
+  const noRow = !!(opts && opts.noRowExpand)
+  const boxes = pageMergeBoxes.value
+  if (!boxes.length) return { ...n }
+  let { r0, r1, c0, c1 } = n
+  let changed = true
+  let guard = 0
+  while (changed && guard++ < 32) {
+    changed = false
+    for (let i = 0; i < boxes.length; i++) {
+      const b = boxes[i]
+      if (b.r0 > r1 || b.r1 < r0 || b.c0 > c1 || b.c1 < c0) continue
+      if (!noRow) {
+        if (b.r0 < r0) { r0 = b.r0; changed = true }
+        if (b.r1 > r1) { r1 = b.r1; changed = true }
+      }
+      if (!noCol) {
+        if (b.c0 < c0) { c0 = b.c0; changed = true }
+        if (b.c1 > c1) { c1 = b.c1; changed = true }
+      }
+    }
+  }
+  return { r0, r1, c0, c1 }
+}
+
+/** 渲染用选区：已提交块 + 拖选中的预览块 */
+const displayRanges = computed(() => {
+  const base = selRanges.value
+  const dragging = selState.down && selState.dragMoved
+  if (!dragging) return base
+  const cur = expandSelByMerges(rawNorm())
+  if (selAdditive.value && base.length) return [...base, cur]
+  return [cur]
+})
+
 function clearSel() {
+  selRanges.value = []
   selState.active = false
   selState.dragMoved = false
   selState.down = false
+  selAdditive.value = false
+  clearLongPress()
 }
 
 function isCellSelected(ri, ci) {
-  if (!selState.active) return false
-  const n = selNorm()
-  return ri >= n.r0 && ri <= n.r1 && ci >= n.c0 && ci <= n.c1
+  const rs = displayRanges.value
+  if (!rs || !rs.length) return false
+  for (let i = 0; i < rs.length; i++) {
+    const n = rs[i]
+    if (ri >= n.r0 && ri <= n.r1 && ci >= n.c0 && ci <= n.c1) return true
+  }
+  return false
 }
 
 function flashToast(msg) {
@@ -827,29 +1050,71 @@ function cellLinkOf(row, colName) {
   return (deco && deco.link) || null
 }
 
-async function copySelection() {
-  if (!selState.active) return
-  const n = selNorm()
+/** 选区单元格取值：落在合并区内时用锚点格的值/链接 */
+function selCellSource(ri, ci) {
   const rows = page.value?.rows || []
   const cols = visibleCols.value
-  const rLo = Math.max(0, n.r0)
-  const rHi = Math.min(rows.length - 1, n.r1)
-  const cLo = Math.max(0, n.c0)
-  const cHi = Math.min(cols.length - 1, n.c1)
+  const row = rows[ri]
+  const col = cols[ci]
+  if (!row || !col) return { row, col, v: null, link: null }
+  if (isRichTable.value && page.value?.merges?.length && richLayout.value) {
+    const lay = richLayout.value
+    const absCol = lay.visAbs[ci]
+    const absRow = lay.off + ri
+    if (absCol != null && absCol >= 0) {
+      for (const mg of page.value.merges) {
+        if (absRow >= mg.r && absRow <= mg.r1 && absCol >= mg.c && absCol <= mg.c1) {
+          const aRel = mg.r - lay.off
+          const aCol = lay.all[mg.c]
+          if (aRel >= 0 && aRel < rows.length && aCol) {
+            const aRow = rows[aRel]
+            return { row: aRow, col: aCol, v: aRow[aCol.name], link: cellLinkOf(aRow, aCol.name) }
+          }
+          break
+        }
+      }
+    }
+  }
+  return { row, col, v: row[col.name], link: cellLinkOf(row, col.name) }
+}
+
+async function copySelection() {
+  const rs = displayRanges.value
+  if (!rs || !rs.length) return
+  const rows = page.value?.rows || []
+  const cols = visibleCols.value
+  let r0 = Infinity
+  let r1 = -Infinity
+  let c0 = Infinity
+  let c1 = -Infinity
+  for (let i = 0; i < rs.length; i++) {
+    const n = rs[i]
+    r0 = Math.min(r0, n.r0)
+    r1 = Math.max(r1, n.r1)
+    c0 = Math.min(c0, n.c0)
+    c1 = Math.max(c1, n.c1)
+  }
+  const rLo = Math.max(0, r0)
+  const rHi = Math.min(rows.length - 1, r1)
+  const cLo = Math.max(0, c0)
+  const cHi = Math.min(cols.length - 1, c1)
   if (rLo > rHi || cLo > cHi) return
 
   const mat = []
   for (let ri = rLo; ri <= rHi; ri++) {
-    const row = rows[ri]
     const line = []
     for (let ci = cLo; ci <= cHi; ci++) {
-      const col = cols[ci]
-      const v = row[col.name]
-      const link = cellLinkOf(row, col.name)
-      if (v && typeof v === 'object' && ('__s' in v || '__c' in v)) {
+      if (!isCellSelected(ri, ci)) {
+        line.push({ val: '', link: null })
+        continue
+      }
+      const src = selCellSource(ri, ci)
+      const v = src.v
+      const link = src.link
+      if (v && typeof v === 'object' && ('__s' in v || '__c' in v) && src.row && src.col) {
         line.push({
           rpc: true,
-          path: serializePath(segs.value.concat([row._idx, col.name])),
+          path: serializePath(segs.value.concat([src.row._idx, src.col.name])),
           link,
           val: '',
         })
@@ -913,7 +1178,7 @@ function onKeyDown(e) {
     return
   }
   if ((e.metaKey || e.ctrlKey) && (e.key === 'c' || e.key === 'C')) {
-    if (selState.active && !(e.target.closest && e.target.closest('input,textarea'))) {
+    if (displayRanges.value.length && !(e.target.closest && e.target.closest('input,textarea'))) {
       e.preventDefault()
       copySelection()
     }
@@ -1060,7 +1325,7 @@ onBeforeUnmount(() => {
           </template>
           <span class="grow" />
           <template v-if="node && node.type === 'array'">
-            <span class="faint hint-sel">拖选 · Ctrl+C 复制</span>
+            <span class="faint hint-sel" title="拖选单元格；长按行号选整行，单击列头名称选整列；Ctrl+操作可叠加选区；Ctrl+C 复制">拖选 · 长按行号/点列头选行列 · Ctrl 叠加 · Ctrl+C 复制</span>
             <div class="search-box" :title="searchOptHint">
               <input
                 class="input sm"
@@ -1179,12 +1444,16 @@ onBeforeUnmount(() => {
                 <table v-if="!isRichTable" class="d">
                   <thead>
                     <tr>
-                      <th class="rownum">#</th>
-                      <th v-for="c in visibleCols" :key="c.name">
+                      <th class="rownum" title="单击全选当前页（Ctrl 叠加）" @click="selectAll($event)">#</th>
+                      <th v-for="(c, ci) in visibleCols" :key="c.name">
                         <div class="col-tools">
-                          <span :title="c.name">{{ c.name }}</span>
+                          <span
+                            class="col-name"
+                            :title="'单击选整列（Ctrl 叠加）：' + c.name"
+                            @click="selectCol(ci, $event)"
+                          >{{ c.name }}</span>
                           <span class="tag type">{{ c.type }}</span>
-                          <span class="col-toggle" title="隐藏该列" @click="hideCol(c.name)">⊘</span>
+                          <span class="col-toggle" title="隐藏该列" @click.stop="hideCol(c.name)">⊘</span>
                         </div>
                         <div class="col-filter-row">
                           <input
@@ -1211,8 +1480,10 @@ onBeforeUnmount(() => {
                     <tr v-for="(r, ri) in page?.rows || []" :key="r._idx">
                       <td
                         class="rownum"
-                        title="查看整行"
-                        @click="openModal(parsePath(rowClickPath(r)))"
+                        title="单击查看整行；长按选整行（Ctrl 叠加）"
+                        @mousedown="onRowNumDown($event, ri)"
+                        @mouseup="onRowNumUp($event, ri, r)"
+                        @mouseleave="onRowNumLeave"
                       >{{ r._idx }}</td>
                       <td
                         v-for="(c, ci) in visibleCols"
@@ -1265,15 +1536,19 @@ onBeforeUnmount(() => {
                 <table v-else class="d rich">
                   <thead>
                     <tr>
-                      <th class="rownum">#</th>
+                      <th class="rownum" title="单击全选当前页（Ctrl 叠加）" @click="selectAll($event)">#</th>
                       <th
-                        v-for="c in visibleCols"
+                        v-for="(c, ci) in visibleCols"
                         :key="c.name"
                       >
                         <div class="col-tools">
-                          <span :title="c.name">{{ c.name }}</span>
+                          <span
+                            class="col-name"
+                            :title="'单击选整列（Ctrl 叠加）：' + c.name"
+                            @click="selectCol(ci, $event)"
+                          >{{ c.name }}</span>
                           <span class="tag type">{{ c.type }}</span>
-                          <span class="col-toggle" title="隐藏该列" @click="hideCol(c.name)">⊘</span>
+                          <span class="col-toggle" title="隐藏该列" @click.stop="hideCol(c.name)">⊘</span>
                         </div>
                         <div class="col-filter-row">
                           <input
@@ -1300,8 +1575,10 @@ onBeforeUnmount(() => {
                     <tr v-for="(r, ri) in richLayout.rows" :key="r._idx">
                       <td
                         class="rownum"
-                        title="查看整行"
-                        @click="openModal(parsePath(rowClickPath(r)))"
+                        title="单击查看整行；长按选整行（Ctrl 叠加）"
+                        @mousedown="onRowNumDown($event, ri)"
+                        @mouseup="onRowNumUp($event, ri, r)"
+                        @mouseleave="onRowNumLeave"
                       >{{ r._idx }}</td>
                       <template v-for="(c, ci) in richLayout.cols" :key="c.name">
                         <td
@@ -1309,46 +1586,47 @@ onBeforeUnmount(() => {
                           :data-ri="ri"
                           :data-ci="ci"
                           :data-cp="cellClickPath(r, c)"
-                          :data-full="fullTextOf(r[c.name])"
-                          :rowspan="richLayout.anchors[`${ri},${ci}`]?.rr"
-                          :colspan="richLayout.anchors[`${ri},${ci}`]?.cc"
+                          :data-full="fullTextOf(richCellVal(r, ri, ci, c))"
+                          :rowspan="richRowspan(ri, ci)"
+                          :colspan="richColspan(ri, ci)"
                           :class="{
-                            clickable: isExpandable(r[c.name]) || !!(cellDeco(r, c.name)?.link || cellDeco(r, c.name)?.comment),
+                            clickable: isExpandable(richCellVal(r, ri, ci, c)) || !!(cellDeco(r, c.name)?.link || cellDeco(r, c.name)?.comment),
                             'has-cmt': !!cellCommentOf(r, c.name),
                             'cell-sel': isCellSelected(ri, ci),
+                            mcell: richIsMerge(ri, ci),
                           }"
                           :title="cellCommentOf(r, c.name) || undefined"
                           @mousedown="onTdMouseDown($event, ri, ci)"
                           @click="onRichCellClick($event, r, c)"
                         >
-                          <template v-if="cellDeco(r, c.name)?.link && (r[c.name] == null || typeof r[c.name] !== 'object')">
+                          <template v-if="cellDeco(r, c.name)?.link && (richCellVal(r, ri, ci, c) == null || typeof richCellVal(r, ri, ci, c) !== 'object')">
                             <span class="cell-clip cell-link" :title="cellDeco(r, c.name).link">
-                              {{ trunc(flatten(String(cellTxt(r[c.name]))), 80) }}
+                              {{ trunc(flatten(String(cellTxt(richCellVal(r, ri, ci, c)))), 80) }}
                             </span>
                           </template>
-                          <template v-else-if="r[c.name] && typeof r[c.name] === 'object' && r[c.name].__c === 'array'">
-                            <span class="cell-clip"><span class="badge-obj">Array({{ r[c.name].len ?? 0 }})</span></span>
+                          <template v-else-if="richCellVal(r, ri, ci, c) && typeof richCellVal(r, ri, ci, c) === 'object' && richCellVal(r, ri, ci, c).__c === 'array'">
+                            <span class="cell-clip"><span class="badge-obj">Array({{ richCellVal(r, ri, ci, c).len ?? 0 }})</span></span>
                           </template>
-                          <template v-else-if="r[c.name] && typeof r[c.name] === 'object' && r[c.name].__c === 'object'">
+                          <template v-else-if="richCellVal(r, ri, ci, c) && typeof richCellVal(r, ri, ci, c) === 'object' && richCellVal(r, ri, ci, c).__c === 'object'">
                             <span class="cell-clip"><span class="badge-obj">Object</span></span>
                           </template>
-                          <template v-else-if="r[c.name] && typeof r[c.name] === 'object' && '__s' in r[c.name]">
-                            <span class="cell-clip cell-str">{{ trunc(flatten(r[c.name].__s), 80) }}…</span>
+                          <template v-else-if="richCellVal(r, ri, ci, c) && typeof richCellVal(r, ri, ci, c) === 'object' && '__s' in richCellVal(r, ri, ci, c)">
+                            <span class="cell-clip cell-str">{{ trunc(flatten(richCellVal(r, ri, ci, c).__s), 80) }}…</span>
                           </template>
-                          <template v-else-if="r[c.name] === null || r[c.name] === undefined">
+                          <template v-else-if="richCellVal(r, ri, ci, c) === null || richCellVal(r, ri, ci, c) === undefined">
                             <span class="cell-clip cell-null">null</span>
                           </template>
-                          <template v-else-if="typeof r[c.name] === 'boolean'">
-                            <span class="cell-clip cell-bool">{{ r[c.name] }}</span>
+                          <template v-else-if="typeof richCellVal(r, ri, ci, c) === 'boolean'">
+                            <span class="cell-clip cell-bool">{{ richCellVal(r, ri, ci, c) }}</span>
                           </template>
-                          <template v-else-if="typeof r[c.name] === 'number'">
-                            <span class="cell-clip cell-num">{{ r[c.name] }}</span>
+                          <template v-else-if="typeof richCellVal(r, ri, ci, c) === 'number'">
+                            <span class="cell-clip cell-num">{{ richCellVal(r, ri, ci, c) }}</span>
                           </template>
-                          <template v-else-if="typeof r[c.name] === 'string'">
-                            <span v-if="r[c.name] === ''" class="cell-clip cell-null">(空)</span>
-                            <span v-else class="cell-clip cell-str" :title="r[c.name]">{{ trunc(flatten(r[c.name]), 80) }}</span>
+                          <template v-else-if="typeof richCellVal(r, ri, ci, c) === 'string'">
+                            <span v-if="richCellVal(r, ri, ci, c) === ''" class="cell-clip cell-null">(空)</span>
+                            <span v-else class="cell-clip cell-str" :title="richCellVal(r, ri, ci, c)">{{ trunc(flatten(richCellVal(r, ri, ci, c)), 80) }}</span>
                           </template>
-                          <template v-else><span class="cell-clip">{{ r[c.name] }}</span></template>
+                          <template v-else><span class="cell-clip">{{ richCellVal(r, ri, ci, c) }}</span></template>
                           <sup v-if="cellCommentOf(r, c.name)" class="cmt-mark">●</sup>
                         </td>
                       </template>
@@ -1691,8 +1969,18 @@ table.d {
 .d th.rownum {
   left: 0; /* 左上角交叉格:纵向+横向双向锁定 */
   z-index: 3;
+  cursor: pointer;
+  user-select: none;
 }
 .d th .col-tools { display: flex; align-items: center; gap: 6px; }
+.d th .col-name {
+  cursor: pointer;
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.d th .col-name:hover { color: var(--accent); }
 .d th .col-toggle { cursor: pointer; color: var(--faint); font-size: 13px; }
 .d th .col-toggle:hover { color: var(--accent); }
 .d td {
@@ -1720,6 +2008,7 @@ table.d {
   left: 0;
   background: var(--panel);
   cursor: pointer;
+  user-select: none;
   z-index: 1;
 }
 .d .rownum:hover { background: var(--panel2); color: var(--muted); }
@@ -1790,6 +2079,16 @@ table.d {
   cursor: help;
 }
 .d td[rowspan], .d td[colspan] { vertical-align: middle; }
+/* 合并单元格：内容居中，突破单列 clip 宽度，看起来横跨合并区 */
+.d td.mcell {
+  text-align: center;
+  vertical-align: middle;
+}
+.d td.mcell .cell-clip {
+  max-width: 100%;
+  text-align: center;
+  margin: 0 auto;
+}
 
 .col-pop-wrap { position: relative; }
 .col-popover {
