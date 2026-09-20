@@ -1,5 +1,5 @@
 <script setup>
-import { computed, nextTick, ref, watch } from 'vue'
+import { computed, nextTick, onBeforeUnmount, ref, watch } from 'vue'
 import JsonTree from './JsonTree.vue'
 
 const props = defineProps({
@@ -26,6 +26,56 @@ const treeForce = ref(null) // null | 'open' | 'closed'
 let hitMarks = [] // 高亮 <mark> 元素列表(按 DOM 顺序)
 
 const canDrill = computed(() => props.valueType === 'array' || props.valueType === 'object')
+
+const copied = ref(false)
+let copiedTimer = null
+
+/** 弹窗内「复制」的完整文本：叶子原样；对象/数组用缩进 JSON */
+const fullCopyText = computed(() => {
+  const v = props.value
+  if (v === null || v === undefined) return 'null'
+  if (typeof v === 'string') return v
+  if (typeof v === 'number' || typeof v === 'boolean') return String(v)
+  if (v && typeof v === 'object' && v.__truncated) {
+    // 截断预览：尽量带上已知字段，否则用 preview
+    if (typeof v.__s === 'string') return v.__s
+    if (v.preview != null) return String(v.preview)
+    try { return JSON.stringify(v, null, 2) } catch { return String(v) }
+  }
+  try {
+    return JSON.stringify(v, null, 2)
+  } catch {
+    return String(v)
+  }
+})
+
+async function copyFullContent() {
+  const text = fullCopyText.value
+  let ok = false
+  try {
+    if (navigator.clipboard && navigator.clipboard.writeText) {
+      await navigator.clipboard.writeText(text)
+      ok = true
+    }
+  } catch { /* fall through */ }
+  if (!ok) {
+    try {
+      const ta = document.createElement('textarea')
+      ta.value = text
+      ta.style.cssText = 'position:fixed;top:-9999px;opacity:0'
+      document.body.appendChild(ta)
+      ta.focus()
+      ta.select()
+      ok = document.execCommand('copy')
+      ta.remove()
+    } catch {
+      ok = false
+    }
+  }
+  copied.value = ok
+  clearTimeout(copiedTimer)
+  copiedTimer = setTimeout(() => { copied.value = false }, 1600)
+}
 
 function expandAll() {
   treeForce.value = 'open'
@@ -79,6 +129,8 @@ watch(() => props.open, (v) => {
     matchIdx.value = -1
     hitMarks = []
     treeForce.value = null
+    copied.value = false
+    clearTimeout(copiedTimer)
   }
 })
 
@@ -246,6 +298,8 @@ function openLink(url) {
   } catch { /* fall through */ }
   if (typeof window.open === 'function') window.open(url, '_blank', 'noopener')
 }
+
+onBeforeUnmount(() => { clearTimeout(copiedTimer) })
 </script>
 
 <template>
@@ -292,6 +346,13 @@ function openLink(url) {
           <button class="btn sm" type="button" title="全部收起" @click="collapseAll">全部收起</button>
         </template>
         <button v-if="canDrill" class="btn sm" type="button" @click="emit('drill')">钻取</button>
+        <button
+          type="button"
+          class="btn sm"
+          :class="{ ok: copied }"
+          :title="copied ? '已复制' : '复制单元格全部内容'"
+          @click="copyFullContent"
+        >{{ copied ? '已复制' : '复制' }}</button>
         <button class="btn sm" type="button" @click="emit('close')">关闭</button>
       </div>
       <div v-if="link" class="jlink-bar">
@@ -447,6 +508,11 @@ function openLink(url) {
   color: var(--text);
 }
 .btn:hover { background: var(--panel2); }
+.btn.ok {
+  color: var(--accent);
+  border-color: color-mix(in srgb, var(--accent) 45%, transparent);
+  background: var(--accent-soft);
+}
 .jcmt-bar {
   display: flex;
   gap: 10px;
