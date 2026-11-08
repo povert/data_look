@@ -25,6 +25,7 @@ const extraPaths = ref([])
 const hidden = ref(new Set())
 
 const extInput = ref('')
+const popExtInput = ref('')
 const showColPop = ref(false)
 const colPopEl = ref(null)
 const tableWrap = ref(null)
@@ -199,6 +200,7 @@ function openFile(path, opts) {
     file.value = info
     segs.value = opts.segs ? opts.segs.slice() : []
     resetColState()
+    acReset()
     if (opts.where) Object.assign(where, opts.where)
     if (opts.notMap) Object.assign(notMap, opts.notMap)
     load({ heavy: true })
@@ -294,6 +296,7 @@ function onDrop(e) {
 function navigateTo(list) {
   segs.value = list.slice()
   resetColState()
+  acReset()
   load({ heavy: true })
 }
 
@@ -447,16 +450,246 @@ function removeExtract(p) {
   load()
 }
 
+/* ---- 提取字段·路径自动补全 ---- */
+// 两个输入(工具条 / 列设置弹层)共用一套建议状态,activeAc 指向当前聚焦者
+const activeAc = ref(null) // 'bar' | 'pop'
+const acItems = ref([]) // [{name,type,len?}]
+const acIdx = ref(-1)
+const acBefore = ref('')
+const acOpen = ref(false)
+let acTimer = null
+
+const SAMPLE_DEBOUNCE_MS = 180
+const SUGGEST_BUDGET_MS = 160
+
+function acCurValue() {
+  if (activeAc.value === 'pop') return String(popExtInput.value || '')
+  if (activeAc.value === 'bar') return String(extInput.value || '')
+  return ''
+}
+
+function acReset() {
+  acItems.value = []
+  acIdx.value = -1
+  acBefore.value = ''
+  acOpen.value = false
+}
+
+function scheduleAcSuggest() {
+  clearTimeout(acTimer)
+  acTimer = setTimeout(runAcSuggest, SAMPLE_DEBOUNCE_MS)
+}
+
+function runAcSuggest() {
+  const input = acCurValue()
+  if (!file.value) {
+    acReset()
+    return
+  }
+  const t0 = Date.now()
+  let res
+  try {
+    res = services().suggest(file.value.file, serializePath(segs.value), input)
+  } catch {
+    acReset()
+    return
+  }
+  if (Date.now() - t0 > SUGGEST_BUDGET_MS) {
+    acReset() // 响应太慢:丢弃本轮,等下次输入
+    return
+  }
+  let cands = (res.items || [])
+    .filter(it => it && it.name) // 已提取列不再提示
+    .filter(it => !extraPaths.value.includes(res.before + it.name))
+  acItems.value = cands
+  acBefore.value = res.before || ''
+  acIdx.value = cands.length ? 0 : -1
+  acOpen.value = cands.length > 0
+}
+
+function acOnInput() {
+  if (activeAc.value == null) return
+  acOpen.value = true
+  scheduleAcSuggest()
+}
+
+function acPrefixCommon(items) {
+  if (!items.length) return ''
+  let p = items[0].name
+  for (const it of items.slice(1)) {
+    while (p && !it.name.toLowerCase().startsWith(p.toLowerCase())) {
+      p = p.slice(0, -1)
+    }
+  }
+  return p
+}
+
+function acCommitInput(v) {
+  if (activeAc.value === 'pop') popExtInput.value = v
+  else if (activeAc.value === 'bar') extInput.value = v
+}
+
+function acSetIdx(i) {
+  acIdx.value = Math.max(0, Math.min(i, acItems.value.length - 1))
+}
+
+/** Enter/点击选中候选:数组/对象候选加 '.' 进下一层;叶子候选填入后收起(回车提交) */
+function acAcceptCand(cand) {
+  const before = acBefore.value
+  const name = String(cand.name || '')
+  if (cand.type === 'array' || cand.type === 'object') {
+    acCommitInput(before + name + '.')
+    acOpen.value = false
+    acIdx.value = -1
+    // 立即取下一层建议,无需等 debounce
+    runAcSuggest()
+  } else {
+    acCommitInput(before + name)
+    acReset()
+  }
+}
+
+/** Tab:唯一/公共前缀补全;补全后唯一候选自动加 '.' 进入下一层 */
+function acTabComplete() {
+  if (!acOpen.value || !acItems.value.length) return false
+  const items = acItems.value
+  const cur = acCurValue()
+  const typed = cur.slice(acBefore.value.length)
+  const common = acPrefixCommon(items)
+  let next
+  if (common && common.toLowerCase().startsWith(typed.toLowerCase()) && common.length > typed.length) {
+    next = acBefore.value + common
+  } else {
+    next = acBefore.value + items[acIdx.value >= 0 ? acIdx.value : 0].name
+  }
+  acCommitInput(next)
+  // 唯一候选且非叶子段 → 附 '.' 进入下一层(可继续钻)
+  if (items.length === 1 && !/[.\]]$/.test(next)) {
+    next += '.'
+    acCommitInput(next)
+  }
+  acOpen.value = items.length === 1
+  acIdx.value = items.length === 1 ? 0 : acIdx.value
+  if (items.length === 1) runAcSuggest()
+  return true
+}
+
+function acFocus(which) {
+  activeAc.value = which
+  acIdx.value = -1
+  scheduleAcSuggest()
+}
+
+function acBlurSoon() {
+  setTimeout(() => {
+    if (activeAc.value) {
+      activeAc.value = null
+      acReset()
+    }
+  }, 150)
+}
+
+/** 下拉候选 v-for 的 :key(完整前缀 + 候选名,保证唯一) */
+function acQuery(item) {
+  return acBefore.value + item.name
+}
+
+/** 输入框回车:候选开着→选中并继续钻;否则提交提取 */
+function acEnter() {
+  const cand = acItems.value[acIdx.value >= 0 ? acIdx.value : 0]
+  if (acOpen.value && acItems.value.length && cand) {
+    acAcceptCand(cand)
+    return
+  }
+  acCommitExtract()
+}
+function acCommitExtract() {
+  if (activeAc.value === 'pop') {
+    addExtractPath(popExtInput.value)
+    popExtInput.value = ''
+  } else if (activeAc.value === 'bar') {
+    addExtractPath(extInput.value)
+    extInput.value = ''
+  }
+  acReset()
+}
+
+/** 工具条「提取字段」键盘:有补全先走补全,否则原回车提交 */
+function extAcKey(e) {
+  if (acOpen.value && activeAc.value === 'bar' && acItems.value.length) {
+    if (e.key === 'ArrowDown' || e.key === 'ArrowUp') {
+      e.preventDefault()
+      const step = e.key === 'ArrowDown' ? 1 : -1
+      acSetIdx((acIdx.value === -1 ? 0 : acIdx.value) + step)
+      return
+    }
+    if (e.key === 'Tab') {
+      e.preventDefault()
+      acTabComplete()
+      return
+    }
+    if (e.key === 'Enter') {
+      e.preventDefault()
+      acEnter()
+      return
+    }
+    if (e.key === 'Escape') {
+      e.stopPropagation()
+      acReset()
+      return
+    }
+  }
+  extEnterBar(e)
+}
+
+function popExtKey(e) {
+  if (acOpen.value && activeAc.value === 'pop' && acItems.value.length) {
+    if (e.key === 'ArrowDown' || e.key === 'ArrowUp') {
+      e.preventDefault()
+      const step = e.key === 'ArrowDown' ? 1 : -1
+      acSetIdx((acIdx.value === -1 ? 0 : acIdx.value) + step)
+      return
+    }
+    if (e.key === 'Tab') {
+      e.preventDefault()
+      acTabComplete()
+      return
+    }
+    if (e.key === 'Enter') {
+      e.preventDefault()
+      acEnter()
+      return
+    }
+    if (e.key === 'Escape') {
+      e.stopPropagation()
+      acReset()
+      return
+    }
+  }
+  if (e.key === 'Enter') {
+    e.preventDefault()
+    addExtractPath(popExtInput.value)
+    popExtInput.value = ''
+    acReset()
+  }
+}
+
 function extEnterBar(e) {
   if (e.key !== 'Enter') return
+  if (activeAc.value === 'bar' && acOpen.value && acItems.value.length) return
   e.preventDefault()
   addExtractPath(extInput.value)
   extInput.value = ''
+  acReset()
 }
 
 function toggleColPopover(e) {
   e && e.stopPropagation()
   showColPop.value = !showColPop.value
+  if (showColPop.value) {
+    popExtInput.value = ''
+    acReset()
+  }
 }
 
 function flatten(s) {
@@ -1297,12 +1530,33 @@ onBeforeUnmount(() => {
                     >✕</span>
                   </label>
                 </div>
-                <div class="cp-foot">
+                <div class="cp-foot ac-wrap">
                   <input
+                    v-model="popExtInput"
                     class="input"
                     placeholder="提取字段,如 user.id"
-                    @keydown.enter.prevent="addExtractPath($event.target.value); $event.target.value = ''"
+                    @input="acOnInput"
+                    @focus="acFocus('pop')"
+                    @blur="acBlurSoon"
+                    @keydown="popExtKey"
                   />
+                </div>
+                <div
+                  v-if="activeAc === 'pop' && acOpen && acItems.length"
+                  class="ac-drop ac-drop-inpop"
+                >
+                  <div
+                    v-for="(item, i) in acItems"
+                    :key="acQuery(item)"
+                    class="ac-item"
+                    :class="{ hl: i === acIdx }"
+                    @mouseenter="acIdx = i"
+                    @mousedown.prevent
+                    @click="acAcceptCand(item)"
+                  >
+                    <span class="ac-name">{{ item.name }}</span>
+                    <span class="tag type">{{ item.type }}</span>
+                  </div>
                 </div>
                 <div v-if="extraPaths.length" class="cp-ext">
                   <span
@@ -1315,13 +1569,32 @@ onBeforeUnmount(() => {
                 </div>
               </div>
             </div>
-            <input
-              v-model="extInput"
-              class="input sm"
-              style="width:180px"
-              placeholder="＋ 提取字段,如 user.id"
-              @keydown="extEnterBar"
-            />
+            <div class="ac-wrap">
+              <input
+                v-model="extInput"
+                class="input sm"
+                style="width:180px"
+                placeholder="＋ 提取字段,如 user.id"
+                @input="acOnInput"
+                @focus="acFocus('bar')"
+                @blur="acBlurSoon"
+                @keydown="extAcKey"
+              />
+              <div v-if="activeAc === 'bar' && acOpen && acItems.length" class="ac-drop">
+                <div
+                  v-for="(item, i) in acItems"
+                  :key="acQuery(item)"
+                  class="ac-item"
+                  :class="{ hl: i === acIdx }"
+                  @mouseenter="acIdx = i"
+                  @mousedown.prevent
+                  @click="acAcceptCand(item)"
+                >
+                  <span class="ac-name">{{ item.name }}</span>
+                  <span class="tag type">{{ item.type }}</span>
+                </div>
+              </div>
+            </div>
           </template>
           <span class="grow" />
           <template v-if="node && node.type === 'array'">
@@ -2123,6 +2396,45 @@ table.d {
 .cp-foot { display: flex; gap: 6px; margin-top: 8px; }
 .cp-foot .input { flex: 1; font-size: 12px; padding: 5px 8px; }
 .cp-ext { display: flex; flex-wrap: wrap; gap: 4px; margin-top: 8px; }
+
+/* 提取字段·路径自动补全 */
+.ac-wrap { position: relative; }
+.ac-drop {
+  position: absolute;
+  top: calc(100% + 4px);
+  left: 0;
+  z-index: 60;
+  min-width: 200px;
+  max-width: 380px;
+  max-height: 220px;
+  overflow: auto;
+  background: var(--panel);
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  box-shadow: 0 8px 24px rgba(0, 0, 0, 0.14);
+  padding: 4px;
+}
+.ac-drop-inpop { width: 100%; top: auto; margin-top: 4px; }
+.ac-item {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 4px 8px;
+  border-radius: 5px;
+  cursor: pointer;
+  font-size: 12px;
+}
+.ac-item:hover, .ac-item.hl { background: var(--accent-soft); }
+.ac-item .ac-name {
+  flex: 1;
+  font-family: var(--mono);
+  font-size: 11px;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.ac-item .tag.type { flex-shrink: 0; color: var(--muted); }
+.ac-item .tag { flex-shrink: 0; }
 
 .pager {
   display: flex;

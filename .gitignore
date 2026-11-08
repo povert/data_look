@@ -29,3 +29,13 @@ dist-ssr
 # OS
 Thumbs.db
 desktop.ini
+
+# 本地辅助文件
+CLAUDE.md
+MEMORY.md
+dev-mock.js
+
+# preload 本地依赖(需 cd public/preload && npm install)
+public/preload/node_modules/
+public/preload/package-lock.json
+

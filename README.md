@@ -15,6 +15,7 @@
 
 - **打开文件**：插件内按钮，或在 uTools 中选中文件后触发「查看数据文件」
 - **表格**：分页（20/50/100）、列筛选、全局搜索（支持区分大小写 / 正则 / `""` 空值）、隐藏列、提取嵌套字段
+- **提取字段补全**：输入 `xxx.` 弹出该层子键候选（取样本行并集），按输入过滤；↑↓ 选中、Tab 补全（唯一候选自动接 `.` 继续下钻）、Enter/点选确认；对象级候选等价于叶子完整值。含数组时提示 `[0]`
 - **钻取**：面包屑点击跳转，✎ 或双击可编辑路径
 - **原始内容**：单元格或行号 → 折叠 JSON 树（可全部展开/收起）
 - **复制**：拖选单元格，Ctrl+C 复制（TSV+HTML，可粘贴到 Excel）
@@ -62,6 +63,7 @@ src/
 ```js
 window.services.view(file, segPath, limit, offset, where, extraCols)
 window.services.record(file, segPath)
+window.services.suggest(file, segPath, input)   // 提取字段补全 → { before, typed, items }
 window.services.getFileInfo(file)
 window.services.pickDataFile()
 ```

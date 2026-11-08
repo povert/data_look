@@ -205,6 +205,24 @@ class ExcelBackend {
     return { type: 'object', count: keys.length, keys }
   }
 
+  /** 路径补全:传 sheet 名(suggest 作 segPath)→ 该 sheet 前 n 行;根 "" → 各 sheet 行并集 */
+  sampleItems(path, n) {
+    const m = this._ensureMeta()
+    const segs = parsePath(String(path || '').replace(/\.+$/, ''))
+    if (!segs.length) {
+      // 根视图提取字段无意义(候选为 sheet 名);取第一个 sheet 的行保底
+      const first = m.sheetnames[0]
+      if (!first) return []
+      const cnt = Math.min(n || nodes.SAMPLE_N, m.sheets[first].count)
+      return this._rows(first, cnt, 0)
+    }
+    if (typeof segs[0] === 'string' && m.sheets[segs[0]]) {
+      const cnt = Math.min(n || nodes.SAMPLE_N, m.sheets[segs[0]].count)
+      return this._rows(segs[0], cnt, 0)
+    }
+    return []
+  }
+
   node(path) {
     const m = this._ensureMeta()
     const segs = parsePath(path)

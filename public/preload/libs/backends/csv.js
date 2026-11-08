@@ -81,24 +81,35 @@ class CsvBackend {
     this._offsets = lineOffsets(this.path)
   }
 
+  /** 行 i 的字节终点(不含换行):下一行起点或文件尾 */
+  _lineEnd(i) {
+    const next = this._offsets[i + 1]
+    return next != null ? next : this.size
+  }
+
+  /**
+   * 精确读一行:行长 = 下一行起点 - 当前行起点,只读该行字节。
+   * 旧实现每次 open 文件、从该行读到文件尾(封顶8MB)再 indexOf 换行 ——
+   * 大 CSV 下每行 O(文件大小) + 每行一次 open/close,翻页/筛选成级放大。
+   */
   _parseRow(lineIdx) {
     this._ensureIndex()
     if (lineIdx < 0 || lineIdx >= this._offsets.length) return []
+    const off = this._offsets[lineIdx]
+    const end = this._lineEnd(lineIdx)
+    const len = end - off
+    if (len <= 0) return []
+    const buf = Buffer.allocUnsafe(len)
     const fd = fs.openSync(this.path, 'r')
     try {
-      const stats = fs.fstatSync(fd)
-      const off = this._offsets[lineIdx]
-      const len = Math.min(8 * 1024 * 1024, stats.size - off)
-      if (len <= 0) return []
-      const buf = Buffer.allocUnsafe(len)
       fs.readSync(fd, buf, 0, len, off)
-      const nl = buf.indexOf(10)
-      let line = (nl === -1 ? buf : buf.subarray(0, nl)).toString('utf8')
-      if (line.endsWith('\r')) line = line.slice(0, -1)
-      return this._delimiter === 'tsv' ? splitTsvLine(line) : splitCsvLine(line)
     } finally {
       fs.closeSync(fd)
     }
+    const nl = buf.indexOf(10)
+    let line = (nl === -1 ? buf : buf.subarray(0, nl)).toString('utf8')
+    if (line.endsWith('\r')) line = line.slice(0, -1)
+    return this._delimiter === 'tsv' ? splitTsvLine(line) : splitCsvLine(line)
   }
 
   _ensureMeta() {
@@ -152,6 +163,16 @@ class CsvBackend {
   rootNode() {
     const m = this._ensureMeta()
     return { type: 'array', count: m.count, cols: m.cols }
+  }
+
+  /** 路径补全:CSV 单元值是字符串,嵌套意义不大;只支持行级 */
+  sampleItems(path, n) {
+    const segs = parsePath(path)
+    if (segs.length) return []
+    const out = []
+    const cnt = Math.min(n || nodes.SAMPLE_N, this._ensureMeta().count)
+    for (let j = 0; j < cnt; j++) out.push(this._dataRow(j))
+    return out
   }
 
   node(path) {

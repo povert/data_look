@@ -54,9 +54,21 @@ class JsonlBackend {
     this._offsets = lineOffsets(this.path)
   }
 
-  _readLineAt(fd, off) {
-    const stats = fs.fstatSync(fd)
-    const len = Math.min(64 * 1024 * 1024, stats.size - off)
+  /** 行 i 的字节终点(不含换行):下一行起点或文件尾 */
+  _lineEnd(i) {
+    const offs = this._offsets
+    const next = offs[i + 1]
+    return next != null ? next : this.size
+  }
+
+  /**
+   * 精确读一行:行长 = 下一行起点 - 当前行起点,只读该行的字节。
+   * 旧实现从 off 一路读到文件尾(封顶64MB)再 indexOf 换行 —— 大文件下
+   * 每行 O(文件大小),建 meta/翻页/筛选/补全都成级放大(41MB 文件单次
+   * 采样 200 行 ≈ 1.4s 同步 IO,直接卡死渲染进程)。
+   */
+  _readLineAt(fd, off, lineEnd) {
+    const len = lineEnd != null ? lineEnd - off : Math.min(4096, this.size - off)
     if (len <= 0) return null
     const buf = Buffer.allocUnsafe(len)
     fs.readSync(fd, buf, 0, len, off)
@@ -71,7 +83,7 @@ class JsonlBackend {
     const fd = fs.openSync(this.path, 'r')
     try {
       for (let i = start; i < end; i++) {
-        out.push(this._readLineAt(fd, this._offsets[i]))
+        out.push(this._readLineAt(fd, this._offsets[i], this._lineEnd(i)))
       }
     } finally {
       fs.closeSync(fd)
@@ -102,7 +114,7 @@ class JsonlBackend {
     const fd = fs.openSync(this.path, 'r')
     try {
       for (let i = 0; i < this._offsets.length; i++) {
-        const it = this._readLineAt(fd, this._offsets[i])
+        const it = this._readLineAt(fd, this._offsets[i], this._lineEnd(i))
         if (nodes.itemMatches(it, where, cols)) out.push(i)
       }
     } finally {
@@ -118,6 +130,26 @@ class JsonlBackend {
     return { type: 'array', count: m.count, cols: m.cols }
   }
 
+  /** 路径补全:取样本行(resolve 到 prefix) */
+  sampleItems(path, n) {
+    const segs = parsePath(path)
+    this._ensureIndex()
+    if (segs.length) {
+      // 嵌套:取几行 resolve
+      const fd = fs.openSync(this.path, 'r')
+      const out = []
+      try {
+        for (let i = 0; i < Math.min(n, this._offsets.length); i++) {
+          const elem = this._readLineAt(fd, this._offsets[i], this._lineEnd(i))
+          if (elem == null) continue
+          out.push(nodes.resolve(elem, segs))
+        }
+      } finally { fs.closeSync(fd) }
+      return out
+    }
+    return this._readRange(0, Math.min(n, this._offsets.length))
+  }
+
   node(path) {
     const segs = parsePath(path)
     if (!segs.length) return this.rootNode()
@@ -129,7 +161,7 @@ class JsonlBackend {
     }
     const fd = fs.openSync(this.path, 'r')
     let elem
-    try { elem = this._readLineAt(fd, this._offsets[idx]) } finally { fs.closeSync(fd) }
+    try { elem = this._readLineAt(fd, this._offsets[idx], this._lineEnd(idx)) } finally { fs.closeSync(fd) }
     return nodes.nodeInfo(nodes.resolve(elem, rest))
   }
 
@@ -146,7 +178,7 @@ class JsonlBackend {
         const fd = fs.openSync(this.path, 'r')
         let rows
         try {
-          rows = sel.map(i => nodes.rowOf(this._readLineAt(fd, this._offsets[i]), cols, i))
+          rows = sel.map(i => nodes.rowOf(this._readLineAt(fd, this._offsets[i], this._lineEnd(i)), cols, i))
         } finally { fs.closeSync(fd) }
         return { rows, total, cols, limit, offset, path, filtered: true }
       }
@@ -165,7 +197,7 @@ class JsonlBackend {
     }
     const fd = fs.openSync(this.path, 'r')
     let elem
-    try { elem = this._readLineAt(fd, this._offsets[idx]) } finally { fs.closeSync(fd) }
+    try { elem = this._readLineAt(fd, this._offsets[idx], this._lineEnd(idx)) } finally { fs.closeSync(fd) }
     const arr = nodes.resolve(elem, rest)
     if (!Array.isArray(arr)) {
       return { rows: [], total: 0, cols: [], limit, offset, path }
@@ -195,7 +227,7 @@ class JsonlBackend {
     }
     const fd = fs.openSync(this.path, 'r')
     let elem
-    try { elem = this._readLineAt(fd, this._offsets[idx]) } finally { fs.closeSync(fd) }
+    try { elem = this._readLineAt(fd, this._offsets[idx], this._lineEnd(idx)) } finally { fs.closeSync(fd) }
     return nodes.boundedRecord(nodes.resolve(elem, rest))
   }
 }

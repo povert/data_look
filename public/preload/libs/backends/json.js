@@ -236,6 +236,69 @@ class JsonBackend {
     return { type: 'scalar', value: val, vtype: nodes.typeName(val) }
   }
 
+  /** 路径补全:取该层数据的样本(resolve 到 prefix) */
+  sampleItems(path, n) {
+    n = n || nodes.SAMPLE_N
+    const m = this._ensureMeta()
+    if (m.root === 'error' || m.root === 'scalar') return []
+    const segs = parsePath(path)
+
+    if (this._mode === 'memory') {
+      const v = nodes.resolve(this._val, segs)
+      if (Array.isArray(v)) return v.slice(0, n)
+      if (v && typeof v === 'object') return [v]
+      return []
+    }
+
+    // stream 模式
+    if (m.root === 'array' && !segs.length) {
+      const s = this._stream
+      const fd = fs.openSync(this.path, 'r')
+      try {
+        const out = []
+        const cnt = Math.min(nodes.SAMPLE_N, s.count)
+        for (let i = 0; i < cnt; i++) out.push(stream.readElementAt(fd, this.size, s.offsets, i))
+        return out
+      } finally { fs.closeSync(fd) }
+    }
+    if (m.root === 'array' && typeof segs[0] === 'number') {
+      const fd = fs.openSync(this.path, 'r')
+      let elem
+      try {
+        elem = stream.readElementAt(fd, this.size, this._stream.offsets, segs[0])
+      } finally { fs.closeSync(fd) }
+      const v = nodes.resolve(elem, segs.slice(1))
+      return Array.isArray(v) ? v.slice(0, n) : (v && typeof v === 'object') ? [v] : []
+    }
+    if (m.root === 'object' && typeof segs[0] === 'string') {
+      const first = segs[0]
+      // objKey 下数组
+      if (segs.length >= 2 && typeof segs[1] === 'number' && m.arrays && m.arrays[first]) {
+        const a = m.arrays[first]
+        const fd = fs.openSync(this.path, 'r')
+        let elem
+        try {
+          elem = stream.readElementAt(fd, this.size, a.offsets, segs[1])
+        } finally { fs.closeSync(fd) }
+        const v = nodes.resolve(elem, segs.slice(2))
+        return Array.isArray(v) ? v.slice(0, n) : (v && typeof v === 'object') ? [v] : []
+      }
+      // obj 的 scalar/obj 值
+      const keyInfo = (this._stream.keys || []).find(k => k.name === first)
+      if (keyInfo) {
+        const fd = fs.openSync(this.path, 'r')
+        let val
+        try {
+          val = stream.readSlice(fd, keyInfo.start, keyInfo.end)
+        } finally { fs.closeSync(fd) }
+        const v = nodes.resolve(val, segs.slice(1))
+        if (Array.isArray(v)) return v.slice(0, n)
+        if (v && typeof v === 'object') return [v]
+      }
+    }
+    return []
+  }
+
   node(path) {
     const m = this._ensureMeta()
     if (m.root === 'error') return this.rootNode()
